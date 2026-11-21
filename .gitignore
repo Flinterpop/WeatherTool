@@ -1,0 +1,19 @@
+# ---- Deny by default -------------------------------------------------------
+*
+
+# ---- Project files ---------------------------------------------------------
+!/.gitignore
+!/README.md
+!/CMakeLists.txt
+!/CMakePresets.json
+!/src/
+!/src/*.cpp
+!/src/*.h
+!/src/*.rc
+!/tests/
+!/tests/*.cpp
+
+# ---- Generated (last match wins) -------------------------------------------
+build/
+out/
+.vs/
