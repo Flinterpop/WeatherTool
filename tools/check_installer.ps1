@@ -3,7 +3,7 @@
 # needs admin). It refuses to start if WeatherTool is installed or %ProgramData%\WeatherTool
 # exists, so it never touches real settings, and at the end it removes what it made.
 #
-#   powershell -ExecutionPolicy Bypass -File tools\check_installer.ps1 -Setup dist\WeatherTool-0.2.0-setup.exe
+#   powershell -ExecutionPolicy Bypass -File tools\check_installer.ps1 -Setup dist\WeatherTool-<version>-setup.exe
 #
 # Checks, each printed PASS or FAIL (and written to -Log when given):
 #   1. a silent install succeeds;

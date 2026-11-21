@@ -16,6 +16,8 @@
 !/tools/*.ps1
 !/installer/
 !/installer/*.iss
+!/web/
+!/web/*.html
 !/tests/
 !/tests/*.cpp
 

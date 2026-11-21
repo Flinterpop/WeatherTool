@@ -7,6 +7,7 @@
 #include "config.h"
 #include "dialogs.h"
 #include "fetcher.h"
+#include "webserver.h"
 #include "theme.h"
 
 #include <memory>
@@ -45,6 +46,10 @@ private:
     void OnRemovePlace();
     void OnMovePlace(int delta);
     void OnExportCsv();
+    bool StartWebServer(bool interactive);   // false (and says why) when it cannot listen
+    void StopWebServer();
+    void OnToggleWebServer();
+    std::wstring WebUrls() const;            // "http://192.168.1.10:8765/" etc.
     void SelectPlace(size_t index);
     void SetView(int view);
 
@@ -109,6 +114,8 @@ private:
     std::wstring dataNote_;
     const Theme* theme_ = nullptr;
     Fetcher      fetcher_;
+    WebServer    web_;
+    WebContent   webContent_;   // views into the exe's resources
     std::unique_ptr<std::array<Climate, kMaxLocations>>      climates_;
     std::array<std::wstring, kMaxLocations>                  errors_{};
     std::wstring status_;

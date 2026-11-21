@@ -1,10 +1,16 @@
 // Unit tests for the UI-free core. No framework: each CHECK prints the
 // failing expression and the exe exits non-zero when any failed.
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
 #include "climate.h"
 #include "config.h"
 #include "http.h"
 #include "jsonscan.h"
 #include "units.h"
+#include "webserver.h"
+
+#include <cstring>
 
 #include <cmath>
 #include <cstdio>
@@ -244,6 +250,12 @@ void TestConfig() {
     CHECK(back.locCount == 2 && back.locs[0].name == L"Montréal, Quebec, CA");
     CHECK(back.units == Units::Imperial && back.theme == ThemeMode::Dark);
     CHECK(back.state.view == 2 && back.state.selected == 1);
+    CHECK(!back.serverEnabled && back.serverPort == 8765);   // defaults
+    back.serverEnabled = true;
+    back.serverPort = 9001;
+    CHECK(SaveServer(back, err));
+    Config srv;
+    CHECK(LoadConfig(dir, srv, err) && srv.serverEnabled && srv.serverPort == 9001);
     CHECK(CacheFileFor(back, back.locs[1]) == dir + L"\\cache\\45.4112_-75.6981.csv");
 
     std::string bytes;
@@ -253,6 +265,69 @@ void TestConfig() {
     DeleteFileW(cfg.path.c_str());
     RemoveDirectoryW((dir + L"\\cache").c_str());
     RemoveDirectoryW(dir.c_str());
+}
+
+void TestHttpReply() {
+    const WebContent c{ "<html>hi</html>", "ICO" };
+    int st = 0;
+    std::string r = HttpReply("GET / HTTP/1.1\r\nHost: x\r\n\r\n", c, st);
+    CHECK(st == 200 && r.rfind("HTTP/1.1 200 OK\r\n", 0) == 0);
+    CHECK(r.find("Content-Type: text/html; charset=utf-8\r\n") != std::string::npos);
+    CHECK(r.find("Content-Length: 15\r\n") != std::string::npos && r.size() > 15 && r.substr(r.size() - 15) == "<html>hi</html>");
+    r = HttpReply("GET /index.html?x=1 HTTP/1.1\r\n\r\n", c, st);
+    CHECK(st == 200);
+    r = HttpReply("HEAD / HTTP/1.1\r\n\r\n", c, st);   // headers only
+    CHECK(st == 200 && r.find("<html>") == std::string::npos && r.find("Content-Length: 15") != std::string::npos);
+    r = HttpReply("GET /favicon.ico HTTP/1.1\r\n\r\n", c, st);
+    CHECK(st == 200 && r.find("image/x-icon") != std::string::npos);
+    CHECK((HttpReply("GET /favicon.ico HTTP/1.1\r\n\r\n", WebContent{ "x", "" }, st), st == 404));
+    // Nothing else is reachable: no files, no traversal.
+    CHECK((HttpReply("GET /../WeatherTool.ini HTTP/1.1\r\n\r\n", c, st), st == 404));
+    CHECK((HttpReply("GET /cache/ HTTP/1.1\r\n\r\n", c, st), st == 404));
+    CHECK((HttpReply("POST / HTTP/1.1\r\n\r\n", c, st), st == 405));
+    CHECK((HttpReply("garbage", c, st), st == 400));
+    CHECK((HttpReply("GET /\r\n\r\n", c, st), st == 400));
+}
+
+// A real server on a free loopback port: request, response, refusal of a
+// second listener on the same port, and a clean stop.
+std::string Fetch(uint16_t port, const char* request) {
+    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(port);
+    InetPtonW(AF_INET, L"127.0.0.1", &a.sin_addr);
+    std::string out;
+    if (connect(s, reinterpret_cast<const sockaddr*>(&a), sizeof(a)) == 0) {
+        send(s, request, static_cast<int>(std::strlen(request)), 0);
+        char buf[4096];
+        for (int i = 0; i < 100; ++i) {
+            const int n = recv(s, buf, sizeof(buf), 0);
+            if (n <= 0) { break; }
+            out.append(buf, static_cast<size_t>(n));
+        }
+    }
+    closesocket(s);
+    return out;
+}
+
+void TestWebServer() {
+    WSADATA wd{};
+    CHECK(WSAStartup(MAKEWORD(2, 2), &wd) == 0);
+    const WebContent c{ "<html>served</html>", "" };
+    WebServer srv;
+    std::wstring err;
+    CHECK(srv.Start(0, c, err) && srv.Running() && srv.Port() != 0);
+    const std::string page = Fetch(srv.Port(), "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    CHECK(page.rfind("HTTP/1.1 200 OK", 0) == 0 && page.find("<html>served</html>") != std::string::npos);
+    CHECK(Fetch(srv.Port(), "GET /nope HTTP/1.1\r\n\r\n").rfind("HTTP/1.1 404", 0) == 0);
+    CHECK(srv.Requests() == 2);
+    WebServer second;   // the same port again must be refused, with a readable reason
+    CHECK(!second.Start(srv.Port(), c, err) && err.find(L"in use") != std::wstring::npos);
+    const uint16_t port = srv.Port();
+    srv.Stop();
+    CHECK(!srv.Running() && Fetch(port, "GET / HTTP/1.1\r\n\r\n").empty());
+    WSACleanup();
 }
 
 // Optional, network-dependent: one real archive download through the app's
@@ -297,6 +372,8 @@ int main(int argc, char** argv) {
     TestGeocode();
     TestUnits();
     TestConfig();
+    TestHttpReply();
+    TestWebServer();
     std::printf("%d checks, %d failed\n", g_checks, g_failed);
     return g_failed == 0 ? 0 : 1;
 }

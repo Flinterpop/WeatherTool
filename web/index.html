@@ -1,0 +1,659 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Weather History</title>
+<style>
+:root {
+  color-scheme: light;
+  --surface-0: #f3f3f1; --surface-1: #fcfcfb; --border: #e2e1dc; --grid: #ebeae6;
+  --text-primary: #0b0b0b; --text-secondary: #52514e; --text-muted: #7a7974;
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-2-soft: #f5b496;
+  --guide: rgba(0,0,0,.06);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --surface-0: #111110; --surface-1: #1a1a19; --border: #2e2e2b; --grid: #292927;
+    --text-primary: #ffffff; --text-secondary: #c3c2b7; --text-muted: #8e8d85;
+    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-2-soft: #7d3f24;
+    --guide: rgba(255,255,255,.07);
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 14px/1.4 system-ui, "Segoe UI", sans-serif; background: var(--surface-0); color: var(--text-primary); }
+header { padding: 14px 20px; background: var(--surface-1); border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; }
+header h1 { font-size: 18px; margin: 0; font-weight: 600; }
+main { max-width: 1280px; margin: 0 auto; padding: 16px 20px 40px; }
+input, select, button { font: inherit; color: inherit; background: var(--surface-1); border: 1px solid var(--border); border-radius: 6px; padding: 5px 9px; }
+button { cursor: pointer; }
+button:hover { border-color: var(--text-muted); }
+button.on { background: var(--text-primary); color: var(--surface-1); border-color: var(--text-primary); }
+.seg { display: inline-flex; gap: 0; }
+.seg button { border-radius: 0; margin-left: -1px; }
+.seg button:first-child { border-radius: 6px 0 0 6px; margin-left: 0; }
+.seg button:last-child { border-radius: 0 6px 6px 0; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+#results { display: flex; flex-wrap: wrap; gap: 6px; }
+#results button { font-size: 13px; }
+#status { color: var(--text-secondary); font-size: 13px; }
+.card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin-top: 16px; }
+.card h2 { font-size: 15px; margin: 0 0 2px; font-weight: 600; }
+.card .sub { color: var(--text-secondary); font-size: 12.5px; margin-bottom: 8px; }
+.cardhead { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; align-items: flex-start; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+.grid2 > .card { margin-top: 0; }
+.tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 16px; }
+@media (max-width: 900px) { .tiles { grid-template-columns: repeat(2, 1fr); } }
+.tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+.tile .k { color: var(--text-secondary); font-size: 12.5px; }
+.tile .v { font-size: 24px; font-weight: 600; margin: 2px 0; font-variant-numeric: tabular-nums; }
+.tile .d { color: var(--text-muted); font-size: 12px; }
+.chart { position: relative; width: 100%; }
+.chart svg { display: block; width: 100%; overflow: visible; }
+.chart text { fill: var(--text-muted); font-size: 11px; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--text-secondary); margin: 2px 0 6px; }
+.legend i { display: inline-block; width: 14px; height: 0; border-top: 3px solid; vertical-align: middle; margin-right: 5px; border-radius: 2px; }
+.legend i.dash { border-top-style: dashed; border-top-width: 2px; }
+.legend i.box { height: 10px; border: 0; }
+.tip { position: absolute; pointer-events: none; background: var(--surface-1); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 12px; box-shadow: 0 2px 10px rgba(0,0,0,.15); white-space: nowrap; display: none; z-index: 5; }
+.tip b { display: block; margin-bottom: 2px; }
+.tip .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; }
+.tip .val { font-variant-numeric: tabular-nums; float: right; margin-left: 14px; }
+.scale { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-muted); margin-top: 6px; }
+.scale canvas { height: 10px; width: 200px; border-radius: 3px; }
+.months button { padding: 4px 7px; font-size: 12.5px; }
+details summary { cursor: pointer; color: var(--text-secondary); }
+table { border-collapse: collapse; font-size: 12.5px; font-variant-numeric: tabular-nums; margin-top: 8px; }
+th, td { padding: 3px 12px; text-align: right; border-bottom: 1px solid var(--grid); }
+th { color: var(--text-secondary); font-weight: 600; }
+.tablewrap { max-height: 420px; overflow: auto; }
+.empty { color: var(--text-secondary); padding: 40px 0; text-align: center; }
+footer { color: var(--text-muted); font-size: 12px; margin-top: 20px; }
+footer a { color: inherit; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Weather History</h1>
+  <form id="searchForm" class="row">
+    <input id="q" placeholder="Town or city" size="22" autocomplete="off">
+    <button type="submit">Search</button>
+    <button type="button" id="geo" title="Use this browser's location">Use my location</button>
+  </form>
+  <div id="results"></div>
+  <div class="row" style="margin-left:auto">
+    <label>From <select id="start"></select></label>
+    <div class="seg" id="units"><button data-u="metric">°C · cm</button><button data-u="imperial">°F · in</button></div>
+  </div>
+</header>
+<main>
+  <div id="status">Search for a town to begin.</div>
+  <div id="app" hidden>
+    <div class="tiles" id="tiles"></div>
+
+    <div class="card">
+      <div class="cardhead">
+        <div><h2 id="annTitle">Annual temperature</h2><div class="sub">Each calendar year, with its trailing 10-year mean and a least-squares trend.</div></div>
+        <div class="seg" id="annMetric"><button data-k="mean">Mean</button><button data-k="max">Daily high</button><button data-k="min">Daily low</button></div>
+      </div>
+      <div class="legend" id="annLegend"></div>
+      <div class="chart" id="annChart"></div>
+    </div>
+
+    <div class="card">
+      <h2>Snowfall per winter season</h2>
+      <div class="sub">Total from July to the following June, so each winter counts once.</div>
+      <div class="legend" id="snowLegend"></div>
+      <div class="chart" id="snowChart"></div>
+    </div>
+
+    <div class="card">
+      <div class="cardhead">
+        <div><h2 id="monTitle">One month across the years</h2><div class="sub">Pick a month to see how it has changed.</div></div>
+        <div class="seg months" id="monthSel"></div>
+      </div>
+      <div class="grid2" style="margin-top:6px">
+        <div><div class="legend" id="monTLegend"></div><div class="chart" id="monTChart"></div></div>
+        <div><div class="legend" id="monSLegend"></div><div class="chart" id="monSChart"></div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="cardhead">
+        <div><h2 id="heatTitle">Every month, every year</h2><div class="sub" id="heatSub"></div></div>
+        <div class="seg" id="heatSel"><button data-h="temp">Temperature anomaly</button><button data-h="snow">Snowfall</button></div>
+      </div>
+      <div class="chart" id="heatChart"></div>
+      <div class="scale" id="heatScale"></div>
+    </div>
+
+    <div class="grid2" style="margin-top:16px">
+      <div class="card"><h2>Monthly climate: temperature</h2><div class="sub">Mean temperature of each month, averaged over three periods.</div><div class="legend" id="climTLegend"></div><div class="chart" id="climTChart"></div></div>
+      <div class="card"><h2>Monthly climate: snowfall</h2><div class="sub">Mean snowfall of each month over the same periods.</div><div class="legend" id="climSLegend"></div><div class="chart" id="climSChart"></div></div>
+    </div>
+
+    <div class="card">
+      <details>
+        <summary>Data table (annual) and CSV export</summary>
+        <div class="row" style="margin-top:8px"><button id="csv">Download monthly CSV</button></div>
+        <div class="tablewrap" id="table"></div>
+      </details>
+    </div>
+
+    <footer id="footer"></footer>
+  </div>
+</main>
+
+<script>
+'use strict';
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const MONTHS_LONG = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+const FIRST_YEAR = 1940;
+const CACHE_DAYS = 7;
+const NORMAL = [1991, 2020];
+const OLD_NORMAL = [1961, 1990];
+
+const state = {
+  loc: null, raw: null, d: null,
+  units: load('wh.units') || 'metric',
+  start: load('wh.start') || FIRST_YEAR,
+  annMetric: 'mean', month: new Date().getMonth(), heat: 'temp'
+};
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+function load(key) { try { const s = localStorage.getItem(key); return s ? JSON.parse(s) : null; } catch (e) { return null; } }
+function save(key, v) { try { localStorage.setItem(key, JSON.stringify(v)); return true; } catch (e) { return false; } }
+function setStatus(msg) { $('status').textContent = msg; }
+
+/* ---------- units ---------- */
+const metric = () => state.units === 'metric';
+const tU = () => metric() ? '°C' : '°F';
+const sU = () => metric() ? 'cm' : 'in';
+const cT = v => v == null ? null : metric() ? v : v * 1.8 + 32;     // absolute temperature
+const cDT = v => v == null ? null : metric() ? v : v * 1.8;         // temperature difference
+const cS = v => v == null ? null : metric() ? v : v / 2.54;         // snowfall
+const fT = v => v == null ? '–' : v.toFixed(1) + ' ' + tU();
+const fDT = v => v == null ? '–' : (v >= 0 ? '+' : '−') + Math.abs(v).toFixed(2) + ' ' + tU();
+const fS = v => v == null ? '–' : (metric() ? v.toFixed(0) : v.toFixed(1)) + ' ' + sU();
+
+/* ---------- statistics ---------- */
+function mean(a) { let s = 0, n = 0; for (const v of a) if (v != null) { s += v; n++; } return n ? s / n : null; }
+function linreg(xs, ys) {
+  let n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;
+  for (let i = 0; i < xs.length; i++) {
+    const y = ys[i]; if (y == null) continue;
+    const x = xs[i]; n++; sx += x; sy += y; sxx += x * x; sxy += x * y;
+  }
+  if (n < 10) return null;
+  const den = n * sxx - sx * sx; if (den === 0) return null;
+  const slope = (n * sxy - sx * sy) / den;
+  return { slope, icpt: (sy - slope * sx) / n, n };
+}
+function trendLine(xs, ys) {
+  const r = linreg(xs, ys); if (!r) return { r: null, line: xs.map(() => null) };
+  let lo = ys.findIndex(v => v != null), hi = ys.length - 1;
+  while (hi > 0 && ys[hi] == null) hi--;
+  return { r, line: xs.map((x, i) => i < lo || i > hi ? null : r.icpt + r.slope * x) };
+}
+function rolling(a, w, minN) {
+  return a.map((_, i) => {
+    if (i < w - 1 || a[i] == null) return null;
+    const win = a.slice(i - w + 1, i + 1).filter(v => v != null);
+    return win.length >= minN ? win.reduce((s, v) => s + v, 0) / win.length : null;
+  });
+}
+
+/* ---------- data ---------- */
+async function fetchHistory(loc) {
+  const end = new Date(Date.now() - 6 * 864e5).toISOString().slice(0, 10);
+  const url = 'https://archive-api.open-meteo.com/v1/archive?latitude=' + loc.lat + '&longitude=' + loc.lon +
+    '&start_date=' + FIRST_YEAR + '-01-01&end_date=' + end +
+    '&daily=temperature_2m_mean,temperature_2m_max,temperature_2m_min,snowfall_sum&timezone=auto';
+  const r = await fetch(url);
+  if (!r.ok) {
+    let msg = 'HTTP ' + r.status;
+    try { msg = (await r.json()).reason || msg; } catch (e) { /* keep status */ }
+    throw new Error(msg);
+  }
+  return aggregate(await r.json());
+}
+
+// Daily -> monthly. A month counts only when (almost) every day is present,
+// so the partial current month never drags a mean down.
+function aggregate(j) {
+  const d = j.daily, acc = new Map();
+  for (let i = 0; i < d.time.length; i++) {
+    const t = d.time[i], y = +t.slice(0, 4), m = +t.slice(5, 7) - 1, k = y * 12 + m;
+    let a = acc.get(k);
+    if (!a) { a = { y, m, t: 0, tx: 0, tn: 0, nt: 0, s: 0, ns: 0 }; acc.set(k, a); }
+    const tm = d.temperature_2m_mean[i], tx = d.temperature_2m_max[i], tn = d.temperature_2m_min[i], sn = d.snowfall_sum[i];
+    if (tm != null && tx != null && tn != null) { a.t += tm; a.tx += tx; a.tn += tn; a.nt++; }
+    if (sn != null) { a.s += sn; a.ns++; }
+  }
+  const months = [];
+  for (const a of acc.values()) {
+    const dim = new Date(Date.UTC(a.y, a.m + 1, 0)).getUTCDate();
+    const okT = a.nt >= dim - 1, okS = a.ns >= dim - 1;
+    const r2 = v => Math.round(v * 100) / 100;
+    months.push([a.y, a.m, okT ? r2(a.t / a.nt) : null, okT ? r2(a.tx / a.nt) : null, okT ? r2(a.tn / a.nt) : null, okS ? r2(a.s) : null]);
+  }
+  return { lat: j.latitude, lon: j.longitude, elev: j.elevation, tz: j.timezone, fetched: Date.now(), months };
+}
+
+function derive(raw) {
+  const y0 = raw.months[0][0], y1 = raw.months[raw.months.length - 1][0], nY = y1 - y0 + 1;
+  const blank = () => Array.from({ length: nY }, () => new Array(12).fill(null));
+  const T = blank(), TX = blank(), TN = blank(), S = blank();
+  for (const [y, m, t, tx, tn, s] of raw.months) { const i = y - y0; T[i][m] = t; TX[i][m] = tx; TN[i][m] = tn; S[i][m] = s; }
+  const years = Array.from({ length: nY }, (_, i) => y0 + i);
+  const annual = g => g.map(row => row.every(v => v != null) ? mean(row) : null);
+  // Season starting in year y: Jul y .. Jun y+1.
+  const season = years.map((y, i) => {
+    if (i + 1 >= nY) return null;
+    const parts = S[i].slice(6).concat(S[i + 1].slice(0, 6));
+    return parts.every(v => v != null) ? parts.reduce((a, b) => a + b, 0) : null;
+  });
+  const periodMean = (g, [a, b]) => MONTHS.map((_, m) => mean(years.map((y, i) => y >= a && y <= b ? g[i][m] : null)));
+  const ann = annual(T);
+  const complete = years.filter((y, i) => ann[i] != null);
+  const last10 = complete.length >= 10 ? [complete[complete.length - 10], complete[complete.length - 1]] : null;
+  return {
+    y0, y1, years, T, TX, TN, S, season,
+    ann: { mean: ann, max: annual(TX), min: annual(TN) },
+    normT: periodMean(T, NORMAL), last10,
+    clim: [OLD_NORMAL, NORMAL, last10].filter(Boolean).map(p => ({ p, t: periodMean(T, p), s: periodMean(S, p) }))
+  };
+}
+
+async function loadLocation(loc) {
+  state.loc = loc; save('wh.loc', loc);
+  history.replaceState(null, '', '#lat=' + loc.lat + '&lon=' + loc.lon + '&name=' + encodeURIComponent(loc.name));
+  $('results').innerHTML = '';
+  const key = loc.lat.toFixed(3) + ',' + loc.lon.toFixed(3);
+  const cached = load('wh.data');
+  if (cached && cached.key === key && Date.now() - cached.raw.fetched < CACHE_DAYS * 864e5) {
+    state.raw = cached.raw;
+  } else {
+    setStatus('Downloading daily weather since ' + FIRST_YEAR + ' for ' + loc.name + '…');
+    try { state.raw = await fetchHistory(loc); }
+    catch (e) { setStatus('Could not download data: ' + e.message); return; }
+    if (!save('wh.data', { key, raw: state.raw })) console.warn('Could not cache data in localStorage');
+  }
+  state.d = derive(state.raw);
+  buildStartSelect();
+  $('app').hidden = false;
+  const r = state.raw;
+  setStatus(loc.name + ' · ' + r.lat.toFixed(2) + '°, ' + r.lon.toFixed(2) + '° · grid elevation ' + Math.round(r.elev) + ' m · data ' +
+    state.d.y0 + '–' + state.d.y1 + ' (fetched ' + new Date(r.fetched).toLocaleDateString() + ')');
+  renderAll();
+}
+
+/* ---------- location search ---------- */
+async function search(q) {
+  $('results').textContent = 'Searching…';
+  try {
+    const r = await fetch('https://geocoding-api.open-meteo.com/v1/search?count=8&language=en&format=json&name=' + encodeURIComponent(q));
+    const j = await r.json();
+    const list = j.results || [];
+    $('results').innerHTML = '';
+    if (!list.length) { $('results').textContent = 'No match.'; return; }
+    for (const p of list) {
+      const b = document.createElement('button');
+      const name = [p.name, p.admin1, p.country_code].filter(Boolean).join(', ');
+      b.textContent = name;
+      b.onclick = () => loadLocation({ name, lat: p.latitude, lon: p.longitude });
+      $('results').appendChild(b);
+    }
+  } catch (e) { $('results').textContent = 'Search failed: ' + e.message; }
+}
+
+/* ---------- chart primitives ---------- */
+function niceTicks(min, max, count) {
+  const span = max - min || 1, raw = span / count, mag = Math.pow(10, Math.floor(Math.log10(raw))), norm = raw / mag;
+  const step = (norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10) * mag;
+  const lo = Math.floor(min / step) * step, hi = Math.ceil(max / step) * step, ticks = [];
+  for (let v = lo, k = 0; v <= hi + step / 2 && k < 50; v += step, k++) ticks.push(+v.toFixed(10));
+  return { lo, hi, ticks };
+}
+const SVGNS = 'http://www.w3.org/2000/svg';
+function el(tag, attrs, parent) {
+  const e = document.createElementNS(SVGNS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function barPath(x, w, yBase, yTop) {
+  const h = yBase - yTop; if (h <= 0) return '';
+  const r = Math.min(3, w / 2, h);
+  return 'M' + x + ',' + yBase + 'V' + (yTop + r) + 'Q' + x + ',' + yTop + ' ' + (x + r) + ',' + yTop +
+    'H' + (x + w - r) + 'Q' + (x + w) + ',' + yTop + ' ' + (x + w) + ',' + (yTop + r) + 'V' + yBase + 'Z';
+}
+function legend(host, series) {
+  host.innerHTML = series.filter(s => s.legend !== false).map(s =>
+    '<span><i class="' + (s.kind === 'bar' ? 'box' : s.dash ? 'dash' : '') + '" style="' +
+    (s.kind === 'bar' ? 'background' : 'border-top-color') + ':' + s.color + '"></i>' + esc(s.label) + '</span>').join('');
+}
+
+// Index-banded chart: x is position 0..n-1, series are 'line' or 'bar'.
+function drawChart(host, cfg) {
+  host.innerHTML = '';
+  const W = Math.max(300, host.clientWidth), H = cfg.height || 250, m = { l: 46, r: 10, t: 8, b: 24 };
+  const n = cfg.n, pw = W - m.l - m.r, ph = H - m.t - m.b, step = pw / n;
+  const vals = []; for (const s of cfg.series) for (const v of s.values) if (v != null && isFinite(v)) vals.push(v);
+  if (!vals.length) { host.innerHTML = '<div class="empty">No data for this selection.</div>'; return; }
+  const bars = cfg.series.filter(s => s.kind === 'bar');
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  if (bars.length) { lo = Math.min(0, lo); hi = hi + (hi - lo) * 0.04 || 1; }
+  else { const pad = (hi - lo) * 0.06 || 1; lo -= pad; hi += pad; }
+  const tk = niceTicks(lo, hi, 5);
+  const X = i => m.l + step * (i + 0.5), Y = v => m.t + ph * (1 - (v - tk.lo) / (tk.hi - tk.lo));
+  const svg = el('svg', { viewBox: '0 0 ' + W + ' ' + H, height: H, role: 'img', 'aria-label': cfg.title || '' }, host);
+
+  for (const t of tk.ticks) {
+    el('line', { x1: m.l, x2: W - m.r, y1: Y(t), y2: Y(t), style: 'stroke:var(--grid)', 'stroke-width': 1 }, svg);
+    el('text', { x: m.l - 6, y: Y(t) + 3.5, 'text-anchor': 'end' }, svg).textContent = cfg.yTick ? cfg.yTick(t) : t;
+  }
+  for (let i = 0; i < n; i++) {
+    const lab = cfg.xTick(i); if (lab == null) continue;
+    el('line', { x1: X(i), x2: X(i), y1: H - m.b, y2: H - m.b + 4, style: 'stroke:var(--text-muted)' }, svg);
+    el('text', { x: X(i), y: H - 6, 'text-anchor': 'middle' }, svg).textContent = lab;
+  }
+  const guide = el('rect', { y: m.t, height: ph, width: Math.max(step, 2), style: 'fill:var(--guide)', visibility: 'hidden' }, svg);
+
+  const bw = Math.max(1, step * (bars.length > 1 ? 0.8 : 0.7) / Math.max(1, bars.length));
+  const gap = bars.length > 1 ? 1 : 0;
+  bars.forEach((s, k) => {
+    const g = el('g', { style: 'fill:' + s.color }, svg);
+    s.values.forEach((v, i) => {
+      if (v == null || v <= 0) return;
+      const x = X(i) - (bw * bars.length) / 2 + k * bw + gap / 2;
+      el('path', { d: barPath(x, bw - gap, Y(Math.max(tk.lo, 0)), Y(v)) }, g);
+    });
+  });
+  const dots = [];
+  for (const s of cfg.series.filter(s => s.kind !== 'bar')) {
+    let d = '', pen = false;
+    s.values.forEach((v, i) => {
+      if (v == null) { pen = false; return; }
+      d += (pen ? 'L' : 'M') + X(i).toFixed(1) + ',' + Y(v).toFixed(1); pen = true;
+    });
+    el('path', { d, fill: 'none', style: 'stroke:' + s.color, 'stroke-width': s.width || 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round', 'stroke-dasharray': s.dash || '' }, svg);
+    if (s.tip !== false) dots.push({ s, c: el('circle', { r: 4, style: 'fill:' + s.color + ';stroke:var(--surface-1)', 'stroke-width': 2, visibility: 'hidden' }, svg) });
+  }
+
+  const tip = document.createElement('div'); tip.className = 'tip'; host.appendChild(tip);
+  const hit = el('rect', { x: m.l, y: m.t, width: pw, height: ph, fill: 'transparent' }, svg);
+  const scale = () => host.clientWidth / W;
+  hit.addEventListener('mousemove', ev => {
+    const box = svg.getBoundingClientRect(), mx = (ev.clientX - box.left) / scale();
+    const i = Math.max(0, Math.min(n - 1, Math.floor((mx - m.l) / step)));
+    guide.setAttribute('x', X(i) - Math.max(step, 2) / 2); guide.setAttribute('visibility', 'visible');
+    for (const { s, c } of dots) {
+      const v = s.values[i];
+      if (v == null) c.setAttribute('visibility', 'hidden');
+      else { c.setAttribute('cx', X(i)); c.setAttribute('cy', Y(v)); c.setAttribute('visibility', 'visible'); }
+    }
+    const rows = cfg.series.filter(s => s.tip !== false).map(s =>
+      '<div><span class="sw" style="background:' + s.color + '"></span>' + esc(s.label) +
+      '<span class="val">' + (s.values[i] == null ? '–' : (s.fmt || cfg.fmt)(s.values[i])) + '</span></div>').join('');
+    tip.innerHTML = '<b>' + esc(cfg.xFmt(i)) + '</b>' + rows + (cfg.tipExtra ? cfg.tipExtra(i) : '');
+    tip.style.display = 'block';
+    const px = X(i) * scale(), tw = tip.offsetWidth;
+    tip.style.left = (px + 14 + tw > host.clientWidth ? px - tw - 14 : px + 14) + 'px';
+    tip.style.top = '6px';
+  });
+  hit.addEventListener('mouseleave', () => {
+    tip.style.display = 'none'; guide.setAttribute('visibility', 'hidden');
+    for (const { c } of dots) c.setAttribute('visibility', 'hidden');
+  });
+}
+
+/* ---------- colour scales ---------- */
+const dark = () => matchMedia('(prefers-color-scheme: dark)').matches;
+const hex = h => [1, 3, 5].map(k => parseInt(h.slice(k, k + 2), 16));
+function ramp(stops, t) {
+  t = Math.max(0, Math.min(1, t));
+  const p = t * (stops.length - 1), k = Math.min(stops.length - 2, Math.floor(p)), f = p - k;
+  const a = hex(stops[k]), b = hex(stops[k + 1]);
+  return 'rgb(' + a.map((v, j) => Math.round(v + (b[j] - v) * f)).join(',') + ')';
+}
+const divStops = () => dark()
+  ? ['#6da7ec', '#2a78d6', '#1c4a85', '#383835', '#8a2f2e', '#d44544', '#f08a87']
+  : ['#1c5cab', '#5598e7', '#b7d3f6', '#f0efec', '#f4bcb8', '#e34948', '#a8302f'];
+const seqStops = () => dark()
+  ? ['#2a2a28', '#184f95', '#2a78d6', '#6da7ec', '#cde2fb']
+  : ['#f0efec', '#b7d3f6', '#5598e7', '#1c5cab', '#0d366b'];
+
+function drawScale(host, stops, loLabel, hiLabel, midLabel) {
+  host.innerHTML = '<span>' + esc(loLabel) + '</span><canvas width="200" height="10"></canvas><span>' + esc(hiLabel) + '</span>' +
+    (midLabel ? '<span style="margin-left:10px">' + esc(midLabel) + '</span>' : '');
+  const ctx = host.querySelector('canvas').getContext('2d');
+  for (let x = 0; x < 200; x++) { ctx.fillStyle = ramp(stops, x / 199); ctx.fillRect(x, 0, 1, 10); }
+}
+
+function drawHeatmap(host, cfg) {
+  host.innerHTML = '';
+  const W = Math.max(300, host.clientWidth), m = { l: 34, r: 4, t: 4, b: 22 };
+  const nY = cfg.years.length, cw = (W - m.l - m.r) / nY, ch = 17, H = m.t + m.b + ch * 12;
+  const svg = el('svg', { viewBox: '0 0 ' + W + ' ' + H, height: H }, host);
+  const gap = cw > 5 ? 1 : 0;
+  for (let mo = 0; mo < 12; mo++) el('text', { x: m.l - 6, y: m.t + ch * mo + ch / 2 + 4, 'text-anchor': 'end' }, svg).textContent = MONTHS[mo];
+  cfg.years.forEach((y, i) => {
+    if (y % 10 === 0) el('text', { x: m.l + cw * (i + 0.5), y: H - 6, 'text-anchor': 'middle' }, svg).textContent = y;
+    for (let mo = 0; mo < 12; mo++) {
+      const v = cfg.value(i, mo); if (v == null) continue;
+      el('rect', { x: m.l + cw * i + gap / 2, y: m.t + ch * mo + gap / 2, width: Math.max(0.5, cw - gap), height: ch - gap, rx: cw > 6 ? 1.5 : 0, fill: cfg.color(v) }, svg);
+    }
+  });
+  const tip = document.createElement('div'); tip.className = 'tip'; host.appendChild(tip);
+  const ring = el('rect', { width: cw, height: ch, fill: 'none', style: 'stroke:var(--text-primary)', 'stroke-width': 1.5, visibility: 'hidden' }, svg);
+  const hit = el('rect', { x: m.l, y: m.t, width: cw * nY, height: ch * 12, fill: 'transparent' }, svg);
+  hit.addEventListener('mousemove', ev => {
+    const sc = host.clientWidth / W, box = svg.getBoundingClientRect();
+    const i = Math.floor(((ev.clientX - box.left) / sc - m.l) / cw), mo = Math.floor(((ev.clientY - box.top) / sc - m.t) / ch);
+    if (i < 0 || i >= nY || mo < 0 || mo > 11 || cfg.value(i, mo) == null) { tip.style.display = 'none'; ring.setAttribute('visibility', 'hidden'); return; }
+    ring.setAttribute('x', m.l + cw * i); ring.setAttribute('y', m.t + ch * mo); ring.setAttribute('visibility', 'visible');
+    tip.innerHTML = '<b>' + MONTHS_LONG[mo] + ' ' + cfg.years[i] + '</b>' + cfg.tip(i, mo);
+    tip.style.display = 'block';
+    const px = (m.l + cw * i) * sc, tw = tip.offsetWidth;
+    tip.style.left = (px + 18 + tw > host.clientWidth ? px - tw - 8 : px + 18) + 'px';
+    tip.style.top = ((m.t + ch * mo) * sc - 10) + 'px';
+  });
+  hit.addEventListener('mouseleave', () => { tip.style.display = 'none'; ring.setAttribute('visibility', 'hidden'); });
+}
+
+/* ---------- views ---------- */
+function rangeIdx() { const d = state.d; const a = Math.max(0, state.start - d.y0); return { a, years: d.years.slice(a) }; }
+const yearTick = (years, every) => i => years[i] % every === 0 ? String(years[i]) : null;
+const perDecade = r => r ? r.slope * 10 : null;
+
+function tile(k, v, d) { return '<div class="tile"><div class="k">' + esc(k) + '</div><div class="v">' + esc(v) + '</div><div class="d">' + esc(d) + '</div></div>'; }
+
+function renderTiles() {
+  const d = state.d, { a, years } = rangeIdx();
+  const t = d.ann.mean.slice(a).map(cT), s = d.season.slice(a).map(cS);
+  const rT = linreg(years, t), rS = linreg(years, s);
+  const pick = (arr, [p, q]) => mean(arr.map((v, i) => d.years[i] >= p && d.years[i] <= q ? v : null));
+  const oldT = pick(d.ann.mean, OLD_NORMAL), oldS = pick(d.season, OLD_NORMAL);
+  const l10 = d.last10, newT = l10 ? pick(d.ann.mean, l10) : null;
+  // seasons: last 10 complete ones
+  const sIdx = d.season.map((v, i) => v != null ? i : -1).filter(i => i >= 0).slice(-10);
+  const newS = mean(sIdx.map(i => d.season[i]));
+  const seas = y => y + '–' + String(y + 1).slice(2);
+  const sLab = sIdx.length ? seas(d.years[sIdx[0]]) + ' to ' + seas(d.years[sIdx[sIdx.length - 1]]) + ',' : '';
+  const lastT = years.filter((y, i) => t[i] != null).pop();
+  const pct = oldS ? ' (' + Math.round((newS / oldS - 1) * 100) + '%)' : '';
+  $('tiles').innerHTML =
+    tile('Temperature trend', rT ? fDT(perDecade(rT)) + ' / decade' : '–', 'Annual mean, ' + years[0] + ' to ' + lastT) +
+    tile('Last 10 years vs 1961–1990', oldT != null && newT != null ? fDT(cDT(newT - oldT)) : '–',
+      l10 ? 'Mean ' + fT(cT(newT)) + ' (' + l10[0] + '–' + l10[1] + ') vs ' + fT(cT(oldT)) : '') +
+    tile('Snowfall trend', rS ? (rS.slope >= 0 ? '+' : '−') + Math.abs(perDecade(rS)).toFixed(metric() ? 1 : 2) + ' ' + sU() + ' / decade' : '–',
+      'Per season, ' + years[0] + ' onward') +
+    tile('Snow per season, last 10', fS(cS(newS)), sLab + ' vs ' + fS(cS(oldS)) + ' in 1961–1990' + pct);
+}
+
+function renderAnnual() {
+  const d = state.d, { a, years } = rangeIdx(), names = { mean: 'mean', max: 'daily high', min: 'daily low' };
+  const vals = d.ann[state.annMetric].slice(a).map(cT), tr = trendLine(years, vals);
+  $('annTitle').textContent = 'Annual ' + names[state.annMetric] + ' temperature';
+  const series = [
+    { label: 'Year', kind: 'line', values: vals, color: 'var(--series-2-soft)', width: 1.5 },
+    { label: '10-year mean', kind: 'line', values: rolling(vals, 10, 8), color: 'var(--series-2)', width: 3 },
+    { label: 'Trend ' + (tr.r ? fDT(perDecade(tr.r)) + '/decade' : ''), kind: 'line', values: tr.line, color: 'var(--text-muted)', width: 1.5, dash: '5 4' }
+  ];
+  legend($('annLegend'), series);
+  drawChart($('annChart'), { n: years.length, series, fmt: fT, xFmt: i => String(years[i]), xTick: yearTick(years, 10), height: 270 });
+}
+
+function renderSnow() {
+  const d = state.d, { a, years } = rangeIdx();
+  const vals = d.season.slice(a).map(cS), tr = trendLine(years, vals);
+  const lab = y => y + '–' + String(y + 1).slice(2);
+  const series = [
+    { label: 'Season total', kind: 'bar', values: vals, color: 'var(--series-1)' },
+    { label: '10-season mean', kind: 'line', values: rolling(vals, 10, 8), color: 'var(--text-primary)', width: 2 },
+    { label: 'Trend ' + (tr.r ? (tr.r.slope >= 0 ? '+' : '−') + Math.abs(perDecade(tr.r)).toFixed(1) + ' ' + sU() + '/decade' : ''), kind: 'line', values: tr.line, color: 'var(--text-muted)', width: 1.5, dash: '5 4' }
+  ];
+  legend($('snowLegend'), series);
+  drawChart($('snowChart'), { n: years.length, series, fmt: fS, xFmt: i => lab(years[i]), xTick: yearTick(years, 10), height: 250 });
+}
+
+function renderMonth() {
+  const d = state.d, { a, years } = rangeIdx(), mo = state.month;
+  $('monTitle').textContent = MONTHS_LONG[mo] + ' across the years';
+  const t = d.T.slice(a).map(r => cT(r[mo])), s = d.S.slice(a).map(r => cS(r[mo]));
+  const trT = trendLine(years, t), trS = trendLine(years, s);
+  const st = [
+    { label: 'Mean temperature', kind: 'line', values: t, color: 'var(--series-2-soft)', width: 1.5 },
+    { label: '10-year mean', kind: 'line', values: rolling(t, 10, 8), color: 'var(--series-2)', width: 3 },
+    { label: 'Trend ' + (trT.r ? fDT(perDecade(trT.r)) + '/decade' : ''), kind: 'line', values: trT.line, color: 'var(--text-muted)', width: 1.5, dash: '5 4' }
+  ];
+  const ss = [
+    { label: 'Snowfall', kind: 'bar', values: s, color: 'var(--series-1)' },
+    { label: 'Trend ' + (trS.r ? (trS.r.slope >= 0 ? '+' : '−') + Math.abs(perDecade(trS.r)).toFixed(metric() ? 1 : 2) + ' ' + sU() + '/decade' : ''), kind: 'line', values: trS.line, color: 'var(--text-muted)', width: 1.5, dash: '5 4' }
+  ];
+  const hi = d.TX.slice(a).map(r => r[mo]), lo = d.TN.slice(a).map(r => r[mo]);
+  legend($('monTLegend'), st); legend($('monSLegend'), ss);
+  drawChart($('monTChart'), {
+    n: years.length, series: st, fmt: fT, xFmt: i => MONTHS[mo] + ' ' + years[i], xTick: yearTick(years, 20), height: 230,
+    tipExtra: i => hi[i] == null ? '' : '<div style="color:var(--text-muted)">Avg high ' + fT(cT(hi[i])) + ', low ' + fT(cT(lo[i])) + '</div>'
+  });
+  drawChart($('monSChart'), { n: years.length, series: ss, fmt: fS, xFmt: i => MONTHS[mo] + ' ' + years[i], xTick: yearTick(years, 20), height: 230 });
+}
+
+function renderHeat() {
+  const d = state.d, { a, years } = rangeIdx();
+  if (state.heat === 'temp') {
+    const lim = metric() ? 5 : 9;
+    $('heatTitle').textContent = 'Temperature anomaly, every month';
+    $('heatSub').textContent = 'Each month’s mean temperature minus its 1991–2020 average. Red is warmer, blue colder.';
+    const stops = divStops();
+    drawHeatmap($('heatChart'), {
+      years,
+      value: (i, mo) => { const v = d.T[a + i][mo]; return v == null || d.normT[mo] == null ? null : cDT(v - d.normT[mo]); },
+      color: v => ramp(stops, (v + lim) / (2 * lim)),
+      tip: (i, mo) => '<div>Mean ' + fT(cT(d.T[a + i][mo])) + '</div><div>Anomaly ' + fDT(cDT(d.T[a + i][mo] - d.normT[mo])) + '</div>'
+    });
+    drawScale($('heatScale'), stops, '−' + lim + ' ' + tU(), '+' + lim + ' ' + tU(), 'capped at ±' + lim);
+  } else {
+    $('heatTitle').textContent = 'Snowfall, every month';
+    $('heatSub').textContent = 'Total snowfall in each month. Darker is more snow.';
+    const all = []; for (const r of d.S) for (const v of r) if (v != null && v > 0) all.push(v);
+    all.sort((x, y) => x - y);
+    const cap = all.length ? all[Math.floor(all.length * 0.95)] : 1, stops = seqStops();
+    drawHeatmap($('heatChart'), {
+      years,
+      value: (i, mo) => d.S[a + i][mo],
+      color: v => ramp(stops, v / cap),
+      tip: (i, mo) => '<div>Snowfall ' + fS(cS(d.S[a + i][mo])) + '</div>'
+    });
+    drawScale($('heatScale'), stops, '0', fS(cS(cap)) + '+', '');
+  }
+}
+
+function renderClim() {
+  const d = state.d, colors = ['var(--series-1)', 'var(--series-2)', 'var(--series-3)'];
+  const lab = p => p[0] + '–' + p[1] + (p === d.last10 ? ' (last 10 yrs)' : '');
+  const st = d.clim.map((c, k) => ({ label: lab(c.p), kind: 'line', values: c.t.map(cT), color: colors[k], width: 2.5 }));
+  const ss = d.clim.map((c, k) => ({ label: lab(c.p), kind: 'bar', values: c.s.map(cS), color: colors[k] }));
+  legend($('climTLegend'), st); legend($('climSLegend'), ss);
+  const base = { n: 12, xFmt: i => MONTHS_LONG[i], xTick: i => MONTHS[i], height: 240 };
+  drawChart($('climTChart'), Object.assign({ series: st, fmt: fT }, base));
+  drawChart($('climSChart'), Object.assign({ series: ss, fmt: fS }, base));
+}
+
+function renderTable() {
+  const d = state.d, rows = [];
+  for (let i = d.years.length - 1; i >= 0; i--) {
+    rows.push('<tr><td>' + d.years[i] + '</td><td>' + fT(cT(d.ann.mean[i])) + '</td><td>' + fT(cT(d.ann.max[i])) + '</td><td>' +
+      fT(cT(d.ann.min[i])) + '</td><td>' + d.years[i] + '–' + String(d.years[i] + 1).slice(2) + '</td><td>' + fS(cS(d.season[i])) + '</td></tr>');
+  }
+  $('table').innerHTML = '<table><thead><tr><th>Year</th><th>Mean</th><th>Avg high</th><th>Avg low</th><th>Season</th><th>Snowfall</th></tr></thead><tbody>' + rows.join('') + '</tbody></table>';
+}
+
+function renderAll() {
+  if (!state.d) return;
+  for (const b of $('units').children) b.classList.toggle('on', b.dataset.u === state.units);
+  for (const b of $('annMetric').children) b.classList.toggle('on', b.dataset.k === state.annMetric);
+  for (const b of $('heatSel').children) b.classList.toggle('on', b.dataset.h === state.heat);
+  for (const b of $('monthSel').children) b.classList.toggle('on', +b.dataset.m === state.month);
+  renderTiles(); renderAnnual(); renderSnow(); renderMonth(); renderHeat(); renderClim(); renderTable();
+  $('footer').innerHTML = 'Data: <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo.com</a> historical weather API ' +
+    '(ERA5 / ERA5-Land reanalysis, CC BY 4.0). Values are for a ~10–25 km model grid cell at ' + Math.round(state.raw.elev) +
+    ' m, not a weather station, so snowfall especially can differ from a local gauge. Months with missing days are left out.';
+}
+
+function buildStartSelect() {
+  const sel = $('start'), last = state.d.y1 - 20; sel.innerHTML = '';
+  for (let y = state.d.y0; y <= last; y += 10) { const o = document.createElement('option'); o.value = y; o.textContent = y; sel.appendChild(o); }
+  if (state.start > last || state.start < state.d.y0) state.start = state.d.y0;
+  sel.value = state.start;
+}
+
+function downloadCsv() {
+  const lines = ['year,month,mean_temp_C,mean_high_C,mean_low_C,snowfall_cm'];
+  for (const r of state.raw.months) lines.push(r.map((v, k) => v == null ? '' : k === 1 ? v + 1 : v).join(','));
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/csv' }));
+  a.download = 'weather_' + state.loc.name.split(',')[0].replace(/\W+/g, '_') + '_monthly.csv';
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+/* ---------- wiring ---------- */
+$('monthSel').innerHTML = MONTHS.map((m, i) => '<button data-m="' + i + '">' + m + '</button>').join('');
+$('monthSel').onclick = e => { if (e.target.dataset.m != null) { state.month = +e.target.dataset.m; renderAll(); } };
+$('annMetric').onclick = e => { if (e.target.dataset.k) { state.annMetric = e.target.dataset.k; renderAll(); } };
+$('heatSel').onclick = e => { if (e.target.dataset.h) { state.heat = e.target.dataset.h; renderAll(); } };
+$('units').onclick = e => { if (e.target.dataset.u) { state.units = e.target.dataset.u; save('wh.units', state.units); renderAll(); } };
+$('start').onchange = e => { state.start = +e.target.value; save('wh.start', state.start); renderAll(); };
+$('searchForm').onsubmit = e => { e.preventDefault(); const q = $('q').value.trim(); if (q) search(q); };
+$('csv').onclick = downloadCsv;
+$('geo').onclick = () => {
+  if (!navigator.geolocation) { setStatus('This browser has no location service; search by name instead.'); return; }
+  setStatus('Asking the browser for its location…');
+  navigator.geolocation.getCurrentPosition(
+    p => loadLocation({ name: 'My location', lat: +p.coords.latitude.toFixed(3), lon: +p.coords.longitude.toFixed(3) }),
+    err => setStatus('Location unavailable (' + err.message + '); search by name instead.'),
+    { timeout: 15000 });
+};
+let resizeTimer = 0;
+window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(renderAll, 150); });
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', renderAll);
+
+// A bookmarkable location in the URL (#lat=..&lon=..&name=..) wins over the remembered one.
+function locFromHash() {
+  const h = new URLSearchParams(location.hash.slice(1)), lat = parseFloat(h.get('lat')), lon = parseFloat(h.get('lon'));
+  if (!isFinite(lat) || !isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
+  return { name: h.get('name') || lat.toFixed(2) + ', ' + lon.toFixed(2), lat, lon };
+}
+const saved = locFromHash() || load('wh.loc');
+if (saved) loadLocation(saved);
+</script>
+</body>
+</html>

@@ -12,7 +12,11 @@
 param()
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
-if (Get-Process WeatherTool -ErrorAction SilentlyContinue) { throw 'Close WeatherTool first: the build cannot replace a running exe.' }
+# Only a copy running from this build tree blocks the build; an installed copy does not.
+$buildExe = Join-Path $root 'build\Release\WeatherTool.exe'
+if (Get-Process WeatherTool -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $buildExe }) {
+    throw "Close the WeatherTool running from $buildExe first: the build cannot replace a running exe."
+}
 
 $version = [regex]::Match((Get-Content (Join-Path $root 'CMakeLists.txt') -Raw), 'project\(WeatherTool VERSION (\d+\.\d+\.\d+)').Groups[1].Value
 if (-not $version) { throw 'No project(WeatherTool VERSION x.y.z) in CMakeLists.txt.' }

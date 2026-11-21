@@ -29,7 +29,7 @@ constexpr wchar_t kCredit[]    = L"Data: Open-Meteo.com, ERA5 reanalysis (CC BY 
 
 // Menu and control identifiers.
 enum : int {
-    IDM_EXPORT = 100, IDM_OPENDIR, IDM_EXIT,
+    IDM_EXPORT = 100, IDM_OPENDIR, IDM_EXIT, IDM_WEBSERVER, IDM_WEBOPEN,
     IDM_ADD = 110, IDM_REMOVE, IDM_MOVEUP, IDM_MOVEDOWN, IDM_UPDATE, IDM_REDOWNLOAD,
     IDM_VIEW0 = 120,                                  // + View
     IDM_METRIC = 130, IDM_IMPERIAL,
@@ -312,6 +312,10 @@ void App::OnCreate() {
     AppendMenuW(file, MF_STRING, IDM_EXPORT, L"&Export monthly data (CSV)...");
     AppendMenuW(file, MF_STRING, IDM_OPENDIR, L"Open &data folder");
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
+    const std::wstring webItem = L"&Web server (port " + std::to_wstring(cfg_.serverPort) + L")";
+    AppendMenuW(file, MF_STRING, IDM_WEBSERVER, webItem.c_str());
+    AppendMenuW(file, MF_STRING, IDM_WEBOPEN, L"&Open web page in browser");
+    AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file, MF_STRING, IDM_EXIT, L"E&xit");
     HMENU place = CreatePopupMenu();
     AppendMenuW(place, MF_STRING, IDM_ADD, L"&Add...\tCtrl+N");
@@ -354,12 +358,71 @@ void App::OnCreate() {
     };
     hAccel_ = CreateAcceleratorTableW(acc, static_cast<int>(sizeof(acc) / sizeof(acc[0])));
 
+    // The browser version, compiled in as resources (see WeatherTool.rc).
+    auto resource = [this](int id) {
+        HRSRC r = FindResourceW(hInst_, MAKEINTRESOURCEW(id), MAKEINTRESOURCEW(10) /* RT_RCDATA */);
+        HGLOBAL g = r != nullptr ? LoadResource(hInst_, r) : nullptr;
+        const void* p = g != nullptr ? LockResource(g) : nullptr;
+        return p != nullptr ? std::string_view(static_cast<const char*>(p), SizeofResource(hInst_, r)) : std::string_view();
+    };
+    webContent_.html = resource(IDR_WEBPAGE);
+    webContent_.icon = resource(IDR_FAVICON);
+    assert(!webContent_.html.empty());
+
     ApplyTheme();
     RebuildList();
     SyncControls();
     Layout();
     status_ = cfg_.locCount == 0 ? L"Add a place to begin (Place > Add, or the Add button)." : L"Ready.";
     if (!dataNote_.empty()) { status_ += L" (" + dataNote_ + L")"; }
+    if (cfg_.serverEnabled) { (void)StartWebServer(false); }   // remembered from last time
+}
+
+// ---------------------------------------------------------------------------
+// Web server (File > Web server)
+
+std::wstring App::WebUrls() const {
+    const std::wstring port = std::to_wstring(web_.Port());
+    std::wstring s;
+    for (const std::wstring& a : LocalIPv4Addresses(3)) {
+        s += (s.empty() ? L"" : L"  or  ") + (L"http://" + a + L":" + port + L"/");
+    }
+    return s.empty() ? L"http://localhost:" + port + L"/" : s;
+}
+
+bool App::StartWebServer(bool interactive) {
+    if (web_.Running()) { return true; }
+    std::wstring err;
+    if (webContent_.html.empty()) {
+        err = L"the web page is missing from the exe";
+    } else if (web_.Start(static_cast<uint16_t>(cfg_.serverPort), webContent_, err)) {
+        SetStatus(L"Web server on " + WebUrls());
+        SyncControls();
+        return true;
+    }
+    const std::wstring msg = L"Could not start the web server on port " + std::to_wstring(cfg_.serverPort) + L": " + err +
+                             L". The port can be changed with [server] port= in " + cfg_.path + L".";
+    SetStatus(msg);
+    if (interactive) { MessageBoxW(hwnd_, msg.c_str(), kAppName, MB_OK | MB_ICONWARNING); }
+    SyncControls();
+    return false;
+}
+
+void App::StopWebServer() {
+    if (!web_.Running()) { return; }
+    const uint64_t served = web_.Requests();
+    web_.Stop();
+    SetStatus(L"Web server stopped (" + std::to_wstring(served) + (served == 1 ? L" request" : L" requests") + L" served).");
+    SyncControls();
+}
+
+void App::OnToggleWebServer() {
+    const bool turnOn = !web_.Running();
+    if (turnOn && !StartWebServer(true)) { return; }   // stays off; the setting is not changed
+    if (!turnOn) { StopWebServer(); }
+    cfg_.serverEnabled = turnOn;
+    std::wstring err;
+    if (!SaveServer(cfg_, err)) { SetStatus(err); }
 }
 
 void App::CreateFonts() {
@@ -477,6 +540,8 @@ void App::SyncControls() {
         check(IDM_THEME_SYSTEM, cfg_.theme == ThemeMode::System);
         check(IDM_THEME_LIGHT, cfg_.theme == ThemeMode::Light);
         check(IDM_THEME_DARK, cfg_.theme == ThemeMode::Dark);
+        check(IDM_WEBSERVER, web_.Running());
+        EnableMenuItem(hMenu_, IDM_WEBOPEN, MF_BYCOMMAND | (web_.Running() ? MF_ENABLED : MF_GRAYED));
     }
 }
 
@@ -794,13 +859,21 @@ void App::OnCommand(int id, int code) {
         break;
     case IDM_EXPORT:   OnExportCsv(); break;
     case IDM_OPENDIR:  ShellExecuteW(hwnd_, L"open", cfg_.dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL); break;
+    case IDM_WEBSERVER: OnToggleWebServer(); break;
+    case IDM_WEBOPEN:
+        if (web_.Running()) {
+            const std::wstring url = L"http://localhost:" + std::to_wstring(web_.Port()) + L"/";
+            ShellExecuteW(hwnd_, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        }
+        break;
     case IDM_EXIT:     OnClose(); break;
     case IDM_ABOUT: {
         const std::wstring t = std::wstring(kAppName) + L" " + kVersion +
             L"\n\nHistorical temperature and snowfall for the places you choose.\n\n"
             L"Weather data by Open-Meteo.com: ERA5 and ERA5-Land reanalysis from the Copernicus Climate Change "
             L"Service, licensed CC BY 4.0. Values describe a model grid cell of roughly 10 to 25 km, not a "
-            L"weather station; snowfall in particular can differ from a local gauge.\n\nData folder:\n" + cfg_.dir;
+            L"weather station; snowfall in particular can differ from a local gauge.\n\nData folder:\n" + cfg_.dir +
+            L"\n\nWeb server: " + (web_.Running() ? WebUrls() : std::wstring(L"off (File > Web server)"));
         MessageBoxW(hwnd_, t.c_str(), kAppName, MB_OK | MB_ICONINFORMATION);
         break;
     }
@@ -821,6 +894,7 @@ void App::OnClose() {
         MessageBoxW(hwnd_, (L"Could not save the window state:\n" + err).c_str(), kAppName, MB_OK | MB_ICONWARNING);
     }
     ShowWindow(hwnd_, SW_HIDE);   // a download in flight may take a moment to finish
+    web_.Stop();
     fetcher_.Stop();
     DestroyWindow(hwnd_);
 }

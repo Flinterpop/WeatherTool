@@ -36,6 +36,8 @@ struct Config {
     std::wstring cacheDir;   // dir\cache
     Units        units = Units::Metric;
     ThemeMode    theme = ThemeMode::System;
+    bool         serverEnabled = false;   // [server] enabled: run the web page server
+    int          serverPort    = 8765;    // [server] port, 1..65535
     std::array<Location, kMaxLocations> locs{};
     size_t       locCount = 0;
     ViewState    state;
@@ -47,6 +49,7 @@ bool ResolveDataDir(std::wstring& dir, std::wstring& note, std::wstring& err);
 
 bool LoadConfig(const std::wstring& dir, Config& cfg, std::wstring& err);
 bool SaveSettings(const Config& cfg, std::wstring& err);
+bool SaveServer(const Config& cfg, std::wstring& err);
 bool SaveLocations(const Config& cfg, std::wstring& err);
 bool SaveState(const Config& cfg, std::wstring& err);
 

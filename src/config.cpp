@@ -145,6 +145,8 @@ bool LoadConfig(const std::wstring& dir, Config& cfg, std::wstring& err) {
     cfg.units = (ReadStr(cfg, L"settings", L"units", L"metric") == L"imperial") ? Units::Imperial : Units::Metric;
     const std::wstring th = ReadStr(cfg, L"settings", L"theme", L"system");
     cfg.theme = (th == L"light") ? ThemeMode::Light : (th == L"dark") ? ThemeMode::Dark : ThemeMode::System;
+    cfg.serverEnabled = ReadInt(cfg, L"server", L"enabled", 0) != 0;
+    cfg.serverPort    = Clamp(ReadInt(cfg, L"server", L"port", 8765), 1, 65535);
 
     auto buf = std::make_unique<wchar_t[]>(kSectionChars);
     const DWORD got = GetPrivateProfileSectionW(L"locations", buf.get(), kSectionChars, cfg.path.c_str());
@@ -179,6 +181,12 @@ bool SaveSettings(const Config& cfg, std::wstring& err) {
     const wchar_t* th = cfg.theme == ThemeMode::Light ? L"light" : cfg.theme == ThemeMode::Dark ? L"dark" : L"system";
     return WriteStr(cfg, L"settings", L"units", cfg.units == Units::Imperial ? L"imperial" : L"metric", err) &&
            WriteStr(cfg, L"settings", L"theme", th, err);
+}
+
+bool SaveServer(const Config& cfg, std::wstring& err) {
+    assert(cfg.serverPort >= 1 && cfg.serverPort <= 65535);
+    return WriteStr(cfg, L"server", L"enabled", cfg.serverEnabled ? L"1" : L"0", err) &&
+           WriteStr(cfg, L"server", L"port", std::to_wstring(cfg.serverPort), err);
 }
 
 bool SaveLocations(const Config& cfg, std::wstring& err) {

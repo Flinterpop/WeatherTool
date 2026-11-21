@@ -35,6 +35,14 @@ Each release's notes list the SHA-256 of every file.
 - **°F / in** (or View > Imperial) switches units; View > Theme picks system, light or dark.
 - File > Export writes the selected place's monthly data as CSV (°C and cm).
 
+## Web server (for a phone or tablet)
+
+**File > Web server** serves a browser version of WeatherTool to other devices on your network, such as an iPad. The browser version is one HTML page with the same views, compiled into the exe. Tick the menu item and the status line shows the address to open, such as `http://192.168.1.10:8765/`; **File > Open web page in browser** opens it on this PC. The tick is remembered, so the server starts with the app next time.
+
+- The port is 8765 unless `WeatherTool.ini` says otherwise (`[server]` `port=`). If another program already uses the port, WeatherTool says so and leaves the server off.
+- It serves that page and the icon and nothing else: no files from disk, none of the app's settings or cached data, and only GET and HEAD. The page fetches its own data from Open-Meteo, in the browser that opens it. Each browser remembers its own places, in its local storage.
+- Plain HTTP on your local network, so a browser will not offer "use my location" there; search for the town instead. If Windows Firewall is on, Windows asks the first time whether to let WeatherTool accept connections.
+
 ## Data
 
 Data comes from the [Open-Meteo](https://open-meteo.com/) historical weather API: ERA5 and ERA5-Land reanalysis from the Copernicus Climate Change Service, licensed CC BY 4.0. Place search uses Open-Meteo's geocoding API. **These are model values for a grid cell of roughly 10 to 25 km, not station readings**: the header shows the cell's elevation, and snowfall in particular can differ from a local gauge.
@@ -103,6 +111,8 @@ It refuses to run over an existing install or data folder, and cleans up after i
 | `src/fetcher.*` | Worker thread with a bounded job queue; archive downloads and place searches; rate-limit handling. |
 | `src/http.*` | Blocking HTTPS GET on WinHTTP. Copied from StockTool, with three differences: UTF-8 URL encoding, gzip only, and `Retry-After`. |
 | `src/dialogs.*` | The Add place dialog (search runs on the worker thread). |
+| `src/webserver.*` | File > Web server: a small Winsock HTTP server (IPv6 and IPv4, one connection at a time) that serves the compiled-in page and icon, and the LAN addresses to show. |
+| `web/index.html` | The browser version: one self-contained page (plain JavaScript and SVG), compiled into the exe as a resource. |
 | `src/config.*` | Data folder resolution and `WeatherTool.ini`. |
 | `src/units.*` | Metric and imperial conversion and number formatting. |
 | `src/theme.*` | Light and dark palettes and the heatmap colour ramps. |

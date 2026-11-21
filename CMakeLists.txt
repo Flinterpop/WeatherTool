@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 # Single source of truth for the version: it flows into the code
 # (WEATHERTOOL_VERSION*) and the exe's VERSIONINFO resource from here.
-project(WeatherTool VERSION 0.2.0 LANGUAGES CXX RC)
+project(WeatherTool VERSION 0.3.0 LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -31,11 +31,12 @@ add_library(weathertool_core STATIC
     src/jsonscan.cpp
     src/theme.cpp
     src/units.cpp
+    src/webserver.cpp
 )
 target_include_directories(weathertool_core PUBLIC src)
 target_compile_definitions(weathertool_core PUBLIC ${WT_DEFINES})
 target_compile_options(weathertool_core PRIVATE ${WT_OPTIONS})
-target_link_libraries(weathertool_core PUBLIC winhttp gdiplus shell32 advapi32 ole32)
+target_link_libraries(weathertool_core PUBLIC winhttp gdiplus shell32 advapi32 ole32 ws2_32 iphlpapi)
 
 # ---- Application -----------------------------------------------------------
 add_executable(WeatherTool WIN32
