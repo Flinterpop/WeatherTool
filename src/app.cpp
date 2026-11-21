@@ -26,6 +26,7 @@ constexpr wchar_t kVersion[]   = WT_WIDE(WEATHERTOOL_VERSION);
 constexpr wchar_t kClassName[] = L"WeatherToolMain";
 constexpr wchar_t kAppName[]   = L"WeatherTool";
 constexpr wchar_t kCredit[]    = L"Data: Open-Meteo.com, ERA5 reanalysis (CC BY 4.0)";
+constexpr wchar_t kCreditNow[] = L"Data: Open-Meteo.com forecast, national weather models (CC BY 4.0)";
 
 // Menu and control identifiers.
 enum : int {
@@ -35,13 +36,21 @@ enum : int {
     IDM_METRIC = 130, IDM_IMPERIAL,
     IDM_THEME_SYSTEM = 140, IDM_THEME_LIGHT, IDM_THEME_DARK,
     IDM_ABOUT = 150,
+    IDM_TAB0 = 160, IDM_TAB1, IDM_TABNEXT,             // + Tab
     IDC_LIST = 200, IDC_ADD, IDC_REMOVE, IDC_UPDATE, IDC_UNITS,
-    IDC_VIEW0 = 210, IDC_RANGE0 = 220, IDC_MEASURE0 = 230, IDC_MONTH0 = 240,
+    IDC_VIEW0 = 210, IDC_RANGE0 = 220, IDC_MEASURE0 = 230, IDC_MONTH0 = 240, IDC_TAB0 = 250,
 };
 
 constexpr UINT_PTR kUpdateTimer   = 1;
 constexpr UINT     kUpdateEveryMs = 30u * 60u * 1000u;
 constexpr int64_t  kStaleSeconds  = 6 * 3600;
+// Open-Meteo refreshes current conditions every 15 minutes; asking more
+// often returns the same values. Forecasts are fetched only while the Now
+// tab is showing.
+constexpr UINT_PTR kForecastTimer   = 2;
+constexpr UINT     kForecastEveryMs = 15u * 60u * 1000u;
+constexpr int64_t  kForecastStale   = 14 * 60;
+constexpr size_t   kMaxForecastBytes = 256u * 1024u;
 
 // Layout in device-independent pixels.
 constexpr int kMargin   = 10;
@@ -57,8 +66,12 @@ constexpr int kHeaderH  = 72;
 constexpr int kStatusH  = 20;
 constexpr int kMinW     = 1180;
 constexpr int kMinH     = 720;
+constexpr int kTabH     = 30;
+constexpr int kTabW     = 96;
 
+constexpr const wchar_t* kTabNames[kTabCount]   = { L"History", L"Now" };
 constexpr const wchar_t* kViewNames[kViewCount] = { L"Trends", L"Month", L"Heatmap", L"Climate" };
+constexpr const wchar_t* kDayShort[7] = { L"Sun", L"Mon", L"Tue", L"Wed", L"Thu", L"Fri", L"Sat" };
 constexpr const wchar_t* kRangeNames[]          = { L"All years", L"50 years", L"30 years", L"20 years" };
 constexpr const wchar_t* kMeasureNames[3]       = { L"Mean", L"Daily high", L"Daily low" };
 constexpr const wchar_t* kMonthShort[12] = { L"Jan", L"Feb", L"Mar", L"Apr", L"May", L"Jun",
@@ -91,6 +104,34 @@ std::wstring LocalDate(int64_t t) {
     return b.data();
 }
 
+std::wstring ClockNow() {   // "16:03", this PC's time
+    SYSTEMTIME t{};
+    GetLocalTime(&t);
+    std::array<wchar_t, 8> b{};
+    swprintf_s(b.data(), b.size(), L"%02u:%02u", static_cast<unsigned>(t.wHour), static_cast<unsigned>(t.wMinute));
+    return b.data();
+}
+
+int64_t FileUnixTime(const std::wstring& path) {
+    WIN32_FILE_ATTRIBUTE_DATA d{};
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &d)) { return 0; }
+    ULARGE_INTEGER u{};
+    u.LowPart  = d.ftLastWriteTime.dwLowDateTime;
+    u.HighPart = d.ftLastWriteTime.dwHighDateTime;
+    constexpr ULONGLONG kEpoch = 116444736000000000ULL;   // 1970-01-01 in FILETIME units
+    return u.QuadPart > kEpoch ? static_cast<int64_t>((u.QuadPart - kEpoch) / 10000000ULL) : 0;
+}
+
+std::wstring HourLabel(const LocalTime& t) {
+    std::array<wchar_t, 8> b{};
+    swprintf_s(b.data(), b.size(), L"%02d:%02d", t.hour, t.minute);
+    return b.data();
+}
+
+std::wstring DayLabel(const LocalTime& t) {   // "Sat 22"
+    return std::wstring(kDayShort[Weekday(t.year, t.month, t.day)]) + L" " + std::to_wstring(t.day);
+}
+
 RectF ToRectF(const RECT& r) {
     return RectF(static_cast<REAL>(r.left), static_cast<REAL>(r.top),
                  static_cast<REAL>(r.right - r.left), static_cast<REAL>(r.bottom - r.top));
@@ -98,6 +139,11 @@ RectF ToRectF(const RECT& r) {
 
 Font UiFont(float pt, float s, INT style = FontStyleRegular) {
     return Font(L"Segoe UI", FontPx(pt, s), style, UnitPixel);
+}
+
+// GDI+ does no font fallback, and Segoe UI lacks most weather symbols.
+Font GlyphFont(float pt, float s) {
+    return Font(L"Segoe UI Symbol", FontPx(pt, s), FontStyleRegular, UnitPixel);
 }
 
 void PaintText(Graphics& g, const std::wstring& t, const Font& f, const Color& c, float x, float y) {
@@ -172,9 +218,14 @@ App::~App() {
 int App::Px(int dip) const { return static_cast<int>(std::lround(dip * scale_)); }
 
 std::wstring App::KeyFor(const Location& loc) const { return CacheFileFor(cfg_, loc); }
+std::wstring App::ForecastKeyFor(const Location& loc) const { return ForecastFileFor(cfg_, loc); }
 
 bool App::HasData(size_t index) const {
     return index < cfg_.locCount && (*climates_)[index].valid && (*climates_)[index].yearCount > 0;
+}
+
+bool App::HasForecast(size_t index) const {
+    return index < cfg_.locCount && (*forecasts_)[index].valid;
 }
 
 int App::FromYear(const Climate& c) const {
@@ -191,6 +242,7 @@ int App::FromYear(const Climate& c) const {
 bool App::Create(HINSTANCE hInst, int nCmdShow, std::wstring& err) {
     hInst_ = hInst;
     climates_ = std::make_unique<std::array<Climate, kMaxLocations>>();
+    forecasts_ = std::make_unique<std::array<Forecast, kMaxLocations>>();
     std::wstring dir;
     if (!ResolveDataDir(dir, dataNote_, err)) { return false; }
     if (!LoadConfig(dir, cfg_, err)) { return false; }
@@ -235,7 +287,9 @@ bool App::Create(HINSTANCE hInst, int nCmdShow, std::wstring& err) {
     }
     UpdateWindow(hwnd_);
     ScheduleUpdates(false);
+    ScheduleForecasts(false);
     SetTimer(hwnd_, kUpdateTimer, kUpdateEveryMs, nullptr);
+    SetTimer(hwnd_, kForecastTimer, kForecastEveryMs, nullptr);
     return true;
 }
 
@@ -277,8 +331,12 @@ LRESULT App::Handle(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DPICHANGED:  OnDpiChanged(wp, lp); return 0;
     case WM_MEASUREITEM: OnMeasureItem(reinterpret_cast<MEASUREITEMSTRUCT*>(lp)); return TRUE;
     case WM_DRAWITEM:    OnDrawItem(reinterpret_cast<const DRAWITEMSTRUCT*>(lp)); return TRUE;
-    case WM_TIMER:       if (wp == kUpdateTimer) { ScheduleUpdates(false); } return 0;
+    case WM_TIMER:
+        if (wp == kUpdateTimer) { ScheduleUpdates(false); }
+        if (wp == kForecastTimer) { ScheduleForecasts(false); }
+        return 0;
     case WM_APP_ARCHIVE: OnArchiveReady(); return 0;
+    case WM_APP_FORECAST: OnForecastReady(); return 0;
     case WM_GETMINMAXINFO: {
         auto* mm = reinterpret_cast<MINMAXINFO*>(lp);
         mm->ptMinTrackSize.x = Px(kMinW);
@@ -326,6 +384,10 @@ void App::OnCreate() {
     AppendMenuW(place, MF_STRING, IDM_UPDATE, L"&Update all now\tF5");
     AppendMenuW(place, MF_STRING, IDM_REDOWNLOAD, L"Re-download &full history");
     HMENU view = CreatePopupMenu();
+    AppendMenuW(view, MF_STRING, IDM_TAB0, L"&History tab");
+    AppendMenuW(view, MF_STRING, IDM_TAB1, L"&Now tab (current weather and forecast)");
+    AppendMenuW(view, MF_STRING, IDM_TABNEXT, L"Switch ta&b\tCtrl+Tab");
+    AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
     for (int v = 0; v < kViewCount; ++v) {
         const std::wstring t = std::wstring(L"&") + kViewNames[v] + L"\tCtrl+" + std::to_wstring(v + 1);
         AppendMenuW(view, MF_STRING, static_cast<UINT_PTR>(IDM_VIEW0 + v), t.c_str());
@@ -355,6 +417,7 @@ void App::OnCreate() {
         { FVIRTKEY | FCONTROL, '2', IDM_VIEW0 + 1 },
         { FVIRTKEY | FCONTROL, '3', IDM_VIEW0 + 2 },
         { FVIRTKEY | FCONTROL, '4', IDM_VIEW0 + 3 },
+        { FVIRTKEY | FCONTROL, VK_TAB, IDM_TABNEXT },
     };
     hAccel_ = CreateAcceleratorTableW(acc, static_cast<int>(sizeof(acc) / sizeof(acc[0])));
 
@@ -450,6 +513,13 @@ void App::CreateControls() {
                              WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP | LBS_NOTIFY | LBS_OWNERDRAWFIXED |
                                  LBS_NOINTEGRALHEIGHT,
                              0, 0, 10, 10, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LIST)), hInst_, nullptr);
+    // The tabs are drawn here (WM_DRAWITEM), so they follow the app's theme.
+    for (int t = 0; t < kTabCount; ++t) {
+        hTabs_[static_cast<size_t>(t)] = CreateWindowExW(0, L"BUTTON", kTabNames[t], WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                                                         0, 0, 10, 10, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_TAB0 + t)),
+                                                         hInst_, nullptr);
+        assert(hTabs_[static_cast<size_t>(t)] != nullptr);
+    }
     hAdd_    = button(L"Add...", IDC_ADD, false);
     hRemove_ = button(L"Remove", IDC_REMOVE, false);
     hUpdate_ = button(L"Update", IDC_UPDATE, false);
@@ -478,39 +548,53 @@ void App::Layout() {
     MoveWindow(hRemove_, m + bw + gap, btnY, bw, bh, TRUE);
     MoveWindow(hUpdate_, listR - bw, btnY, bw, bh, TRUE);
 
-    // Right: views (+ months when in Month view) and units on row 1.
+    // Tab row: History / Now on the left, units at the right, a rule under it.
     const int x0 = listR + Px(16);
     const int r0 = w - m;
+    for (size_t t = 0; t < hTabs_.size(); ++t) {
+        MoveWindow(hTabs_[t], x0 + static_cast<int>(t) * Px(kTabW), m, Px(kTabW), Px(kTabH), TRUE);
+    }
+    MoveWindow(hUnits_, r0 - Px(80), m + (Px(kTabH) - bh) / 2 - Px(2), Px(80), bh, TRUE);
+    tabLine_ = { x0, m + Px(kTabH), r0, m + Px(kTabH) + 1 };
+    const int row1 = tabLine_.bottom + Px(10);
+
+    // History, row 1: views (+ months in Month view). The Now tab has none
+    // of these, so its header moves up into their place.
+    const bool history = !NowTab();
+    const int show = history ? SW_SHOW : SW_HIDE;
     int x = x0;
     for (HWND hv : hViews_) {
-        MoveWindow(hv, x, m, Px(kViewBtnW), bh, TRUE);
+        ShowWindow(hv, show);
+        MoveWindow(hv, x, row1, Px(kViewBtnW), bh, TRUE);
         x += Px(kViewBtnW) + gap;
     }
     x += Px(12);
-    const bool months = cfg_.state.view == static_cast<int>(View::Month);
+    const bool months = history && cfg_.state.view == static_cast<int>(View::Month);
     for (HWND hm : hMonths_) {
         ShowWindow(hm, months ? SW_SHOW : SW_HIDE);
-        MoveWindow(hm, x, m, Px(kMonthW), bh, TRUE);
+        MoveWindow(hm, x, row1, Px(kMonthW), bh, TRUE);
         x += Px(kMonthW) + 2;
     }
-    headerRect_ = { x0, m + bh + Px(8), r0, m + bh + Px(8) + Px(kHeaderH) };
+    const int headTop = history ? row1 + bh + Px(8) : row1;
+    headerRect_ = { x0, headTop, r0, headTop + Px(kHeaderH) };
 
-    // Row 2: range and measure, units at the right.
+    // History, row 2: range and measure.
     const int row2 = headerRect_.bottom + Px(4);
-    MoveWindow(hUnits_, r0 - Px(80), row2, Px(80), bh, TRUE);
     x = x0;
     for (HWND hr : hRanges_) {
+        ShowWindow(hr, show);
         MoveWindow(hr, x, row2, Px(kRangeW), bh, TRUE);
         x += Px(kRangeW) + gap;
     }
     x += Px(16);
     for (HWND hm : hMeasures_) {
+        ShowWindow(hm, show);
         MoveWindow(hm, x, row2, Px(kMeasureW), bh, TRUE);
         x += Px(kMeasureW) + gap;
     }
 
     statusRect_ = { x0, h - m - Px(kStatusH), r0, h - m };
-    const int top = row2 + bh + Px(12);
+    const int top = history ? row2 + bh + Px(12) : headerRect_.bottom + Px(12);
     const int bottom = statusRect_.top - Px(8);
     const int mid = top + (bottom - top) / 2;
     topRect_    = { x0, top, r0, mid - Px(8) };
@@ -519,6 +603,7 @@ void App::Layout() {
 
 void App::SyncControls() {
     const ViewState& s = cfg_.state;
+    for (HWND ht : hTabs_) { InvalidateRect(ht, nullptr, FALSE); }
     for (int v = 0; v < kViewCount; ++v) { SetCheck(hViews_[static_cast<size_t>(v)], v == s.view); }
     for (size_t r = 0; r < hRanges_.size(); ++r) {
         SetCheck(hRanges_[r], static_cast<int>(r) == s.range);
@@ -534,7 +619,9 @@ void App::SyncControls() {
         auto check = [this](int id, bool on) {
             CheckMenuItem(hMenu_, static_cast<UINT>(id), MF_BYCOMMAND | (on ? MF_CHECKED : MF_UNCHECKED));
         };
-        for (int v = 0; v < kViewCount; ++v) { check(IDM_VIEW0 + v, v == s.view); }
+        check(IDM_TAB0, s.tab == static_cast<int>(Tab::History));
+        check(IDM_TAB1, s.tab == static_cast<int>(Tab::Now));
+        for (int v = 0; v < kViewCount; ++v) { check(IDM_VIEW0 + v, v == s.view && !NowTab()); }
         check(IDM_METRIC, cfg_.units == Units::Metric);
         check(IDM_IMPERIAL, cfg_.units == Units::Imperial);
         check(IDM_THEME_SYSTEM, cfg_.theme == ThemeMode::System);
@@ -591,7 +678,61 @@ void App::LoadCaches() {
             errors_[i] = L"Cache unreadable (" + err + L"); downloading again.";
             c = Climate{};
         }
+        // The last forecast reply, so the Now tab opens with something; its
+        // age is the file's.
+        const std::wstring fk = ForecastKeyFor(cfg_.locs[i]);
+        Forecast& f = (*forecasts_)[i];
+        if (ReadFileBytes(fk, bytes, kMaxForecastBytes, err) && ParseForecast(bytes, f, err)) {
+            f.fetched = FileUnixTime(fk);
+        } else {
+            f = Forecast{};
+        }
     }
+}
+
+void App::ScheduleForecasts(bool force) {
+    if (!NowTab() && !force) { return; }   // only fetched while someone can see them
+    const int64_t now = UnixNow();
+    for (size_t i = 0; i < cfg_.locCount; ++i) {
+        const Forecast& f = (*forecasts_)[i];
+        const bool stale = !f.valid || now - f.fetched > kForecastStale;
+        const Location& loc = cfg_.locs[i];
+        if ((force || stale) && !fetcher_.IsPending(ForecastKeyFor(loc))) {
+            if (!fetcher_.QueueForecast(hwnd_, ForecastKeyFor(loc), ForecastUrl(loc.lat, loc.lon))) {
+                SetStatus(L"The download queue is full; the forecast will be fetched later.");
+                break;
+            }
+        }
+    }
+    InvalidateRect(hList_, nullptr, FALSE);
+}
+
+void App::OnForecastReady() {
+    ForecastResult r;
+    size_t updated = 0;
+    while (fetcher_.TakeForecast(r)) {
+        size_t idx = kMaxLocations;
+        for (size_t i = 0; i < cfg_.locCount; ++i) {
+            if (ForecastKeyFor(cfg_.locs[i]) == r.key) { idx = i; break; }
+        }
+        if (idx == kMaxLocations) { continue; }   // removed while downloading
+        if (!r.ok) {
+            fcErrors_[idx] = r.error;
+            SetStatus(L"Forecast failed for " + cfg_.locs[idx].name + L": " + r.error);
+            continue;
+        }
+        assert(r.data != nullptr);
+        (*forecasts_)[idx] = *r.data;
+        (*forecasts_)[idx].fetched = UnixNow();
+        fcErrors_[idx].clear();
+        std::wstring err;
+        if (!WriteFileBytes(r.key, r.body, err)) { SetStatus(L"Forecast updated, but it could not be saved: " + err); }
+        ++updated;
+    }
+    // Results arrive in batches, so name no count: the last one wins the line.
+    if (updated > 0 && fetcher_.PendingArchives() == 0) { SetStatus(L"Forecast updated at " + ClockNow() + L"."); }
+    InvalidateRect(hwnd_, nullptr, FALSE);
+    InvalidateRect(hList_, nullptr, FALSE);
 }
 
 bool App::QueueUpdate(size_t index, bool full) {
@@ -697,7 +838,9 @@ bool App::AddPlace(const Location& loc, std::wstring& err) {
     const size_t idx = cfg_.locCount++;
     cfg_.locs[idx] = loc;
     (*climates_)[idx] = Climate{};
+    (*forecasts_)[idx] = Forecast{};
     errors_[idx].clear();
+    fcErrors_[idx].clear();
     std::string bytes;
     std::wstring ignored;
     if (ReadFileBytes(key, bytes, 4u * 1024u * 1024u, ignored)) {
@@ -706,6 +849,7 @@ bool App::AddPlace(const Location& loc, std::wstring& err) {
     if (!SaveLocations(cfg_, err)) { return false; }
     RebuildList();
     SelectPlace(idx);
+    ScheduleForecasts(false);   // on the Now tab, fetch its forecast first
     if (!QueueUpdate(idx, false)) {
         err = L"Added, but the download queue is full; press Update later.";
         return false;
@@ -721,15 +865,20 @@ void App::OnRemovePlace() {
     const std::wstring q = L"Remove " + cfg_.locs[i].name + L" and its downloaded data?";
     if (MessageBoxW(hwnd_, q.c_str(), kAppName, MB_YESNO | MB_ICONQUESTION) != IDYES) { return; }
     DeleteFileW(KeyFor(cfg_.locs[i]).c_str());
+    DeleteFileW(ForecastKeyFor(cfg_.locs[i]).c_str());
     for (size_t k = i; k + 1 < cfg_.locCount; ++k) {
         cfg_.locs[k] = cfg_.locs[k + 1];
         (*climates_)[k] = (*climates_)[k + 1];
+        (*forecasts_)[k] = (*forecasts_)[k + 1];
         errors_[k] = errors_[k + 1];
+        fcErrors_[k] = fcErrors_[k + 1];
     }
     --cfg_.locCount;
     cfg_.locs[cfg_.locCount] = Location{};
     (*climates_)[cfg_.locCount] = Climate{};
+    (*forecasts_)[cfg_.locCount] = Forecast{};
     errors_[cfg_.locCount].clear();
+    fcErrors_[cfg_.locCount].clear();
     std::wstring err;
     if (!SaveLocations(cfg_, err)) { SetStatus(err); }
     if (cfg_.state.selected >= cfg_.locCount && cfg_.locCount > 0) { cfg_.state.selected = cfg_.locCount - 1; }
@@ -745,7 +894,9 @@ void App::OnMovePlace(int delta) {
     const size_t k = static_cast<size_t>(j);
     std::swap(cfg_.locs[i], cfg_.locs[k]);
     std::swap((*climates_)[i], (*climates_)[k]);
+    std::swap((*forecasts_)[i], (*forecasts_)[k]);
     std::swap(errors_[i], errors_[k]);
+    std::swap(fcErrors_[i], fcErrors_[k]);
     cfg_.state.selected = k;
     std::wstring err;
     if (!SaveLocations(cfg_, err)) { SetStatus(err); }
@@ -762,9 +913,24 @@ void App::SelectPlace(size_t index) {
 void App::SetView(int view) {
     assert(view >= 0 && view < kViewCount);
     cfg_.state.view = view;
+    if (NowTab()) {
+        SetTab(static_cast<int>(Tab::History));   // Ctrl+1..4 from the Now tab
+        return;
+    }
     SyncControls();
     Layout();
     InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void App::SetTab(int tab) {
+    assert(tab >= 0 && tab < kTabCount);
+    cfg_.state.tab = tab;
+    hoverX_ = hoverY_ = -1;
+    SyncControls();
+    Layout();
+    ScheduleForecasts(false);
+    InvalidateRect(hwnd_, nullptr, FALSE);
+    InvalidateRect(hList_, nullptr, FALSE);
 }
 
 void App::OnExportCsv() {
@@ -803,6 +969,9 @@ void App::OnCommand(int id, int code) {
         }
         return;
     }
+    if (id >= IDC_TAB0 && id < IDC_TAB0 + kTabCount) { SetTab(id - IDC_TAB0); return; }
+    if (id == IDM_TAB0 || id == IDM_TAB1) { SetTab(id - IDM_TAB0); return; }
+    if (id == IDM_TABNEXT) { SetTab((cfg_.state.tab + 1) % kTabCount); return; }
     if (id >= IDC_VIEW0 && id < IDC_VIEW0 + kViewCount) { SetView(id - IDC_VIEW0); return; }
     if (id >= IDM_VIEW0 && id < IDM_VIEW0 + kViewCount) { SetView(id - IDM_VIEW0); return; }
     if (id >= IDC_RANGE0 && id < IDC_RANGE0 + static_cast<int>(kRangeYears.size())) {
@@ -832,7 +1001,14 @@ void App::OnCommand(int id, int code) {
     case IDM_MOVEUP:   OnMovePlace(-1); break;
     case IDM_MOVEDOWN: OnMovePlace(+1); break;
     case IDC_UPDATE:
-    case IDM_UPDATE:   ScheduleUpdates(true); break;
+    case IDM_UPDATE:
+        if (NowTab()) {
+            ScheduleForecasts(true);
+            SetStatus(L"Fetching the forecast…");
+        } else {
+            ScheduleUpdates(true);
+        }
+        break;
     case IDM_REDOWNLOAD:
         if (cfg_.state.selected < cfg_.locCount && QueueUpdate(cfg_.state.selected, true)) {
             SetStatus(L"Downloading the full history of " + cfg_.locs[cfg_.state.selected].name + L"…");
@@ -869,10 +1045,11 @@ void App::OnCommand(int id, int code) {
     case IDM_EXIT:     OnClose(); break;
     case IDM_ABOUT: {
         const std::wstring t = std::wstring(kAppName) + L" " + kVersion +
-            L"\n\nHistorical temperature and snowfall for the places you choose.\n\n"
-            L"Weather data by Open-Meteo.com: ERA5 and ERA5-Land reanalysis from the Copernicus Climate Change "
-            L"Service, licensed CC BY 4.0. Values describe a model grid cell of roughly 10 to 25 km, not a "
-            L"weather station; snowfall in particular can differ from a local gauge.\n\nData folder:\n" + cfg_.dir +
+            L"\n\nHistorical temperature and snowfall for the places you choose, and their weather now.\n\n"
+            L"Weather data by Open-Meteo.com, licensed CC BY 4.0. History: ERA5 and ERA5-Land reanalysis from the "
+            L"Copernicus Climate Change Service. Now: Open-Meteo's forecast from national weather services' models. "
+            L"Values describe a model grid cell, not a weather station; snowfall in particular can differ from a "
+            L"local gauge.\n\nData folder:\n" + cfg_.dir +
             L"\n\nWeb server: " + (web_.Running() ? WebUrls() : std::wstring(L"off (File > Web server)"));
         MessageBoxW(hwnd_, t.c_str(), kAppName, MB_OK | MB_ICONINFORMATION);
         break;
@@ -954,6 +1131,10 @@ void App::OnMeasureItem(MEASUREITEMSTRUCT* mis) const {
 }
 
 void App::OnDrawItem(const DRAWITEMSTRUCT* dis) {
+    if (dis->CtlID >= IDC_TAB0 && dis->CtlID < static_cast<UINT>(IDC_TAB0 + kTabCount)) {
+        DrawTab(dis);
+        return;
+    }
     if (dis->CtlID != IDC_LIST || dis->itemID == static_cast<UINT>(-1)) { return; }
     const size_t i = dis->itemID;
     if (i >= cfg_.locCount) { return; }
@@ -970,10 +1151,75 @@ void App::OnDrawItem(const DRAWITEMSTRUCT* dis) {
     const float s = scale_;
     const float pad = 10.0f * s;
     const Font fName = UiFont(9.5f, s, FontStyleBold);
-    const Font fSmall = UiFont(8.5f, s);
     DrawTextClip(g, cfg_.locs[i].name, fName, theme_->text, RectF(r.X + pad, r.Y + 5.0f * s, r.Width - 2 * pad, 20.0f * s));
-    const float y2 = r.Y + 25.0f * s;
+    if (NowTab()) {
+        DrawListRowNow(g, r, i);
+    } else {
+        DrawListRow(g, r, i);
+    }
+}
 
+// A tab: label, and an accent bar under the selected one.
+void App::DrawTab(const DRAWITEMSTRUCT* dis) {
+    const int t = static_cast<int>(dis->CtlID) - IDC_TAB0;
+    assert(t >= 0 && t < kTabCount);
+    Graphics g(dis->hDC);
+    g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
+    const RectF r = ToRectF(dis->rcItem);
+    SolidBrush bg(theme_->bg);
+    g.FillRectangle(&bg, r);
+    const bool on = t == cfg_.state.tab;
+    const Font f = UiFont(10.5f, scale_, on ? FontStyleBold : FontStyleRegular);
+    const std::wstring label = kTabNames[t];
+    const float w = TextW(g, label, f);
+    PaintText(g, label, f, on ? theme_->text : theme_->textSecondary, r.X + (r.Width - w) / 2.0f, r.Y + 4.0f * scale_);
+    if (on) {
+        SolidBrush accent(theme_->series1);
+        g.FillRectangle(&accent, r.X + 8.0f * scale_, r.Y + r.Height - 3.0f * scale_, r.Width - 16.0f * scale_, 3.0f * scale_);
+    }
+    if ((dis->itemState & ODS_FOCUS) != 0 && (dis->itemState & ODS_NOFOCUSRECT) == 0) {
+        Pen focus(theme_->textMuted, 1.0f);
+        focus.SetDashStyle(DashStyleDot);
+        g.DrawRectangle(&focus, r.X + 2.0f, r.Y + 2.0f, r.Width - 5.0f, r.Height - 8.0f * scale_);
+    }
+}
+
+// Now tab: the temperature and conditions now, and today's high and low.
+void App::DrawListRowNow(Graphics& g, const RectF& r, size_t i) {
+    const float s = scale_;
+    const float pad = 10.0f * s;
+    const float y2 = r.Y + 25.0f * s;
+    const Font fSmall = UiFont(8.5f, s);
+    if (!HasForecast(i)) {
+        const bool busy = fetcher_.IsPending(ForecastKeyFor(cfg_.locs[i]));
+        const std::wstring t = busy ? L"Fetching the forecast…" : fcErrors_[i].empty() ? L"No forecast yet" : fcErrors_[i];
+        DrawTextClip(g, t, fSmall, theme_->textMuted, RectF(r.X + pad, y2, r.Width - 2 * pad, 18.0f * s));
+        return;
+    }
+    const Forecast& f = (*forecasts_)[i];
+    const Units u = cfg_.units;
+    const Font fSym = GlyphFont(9.0f, s);
+    const std::wstring glyph = WeatherGlyph(f.code, f.isDay);
+    float x = r.X + pad;
+    if (!glyph.empty()) {
+        PaintText(g, glyph, fSym, theme_->textSecondary, x, y2 - 2.0f * s);
+        x += TextW(g, glyph, fSym) + 2.0f * s;
+    }
+    const size_t d0 = FirstDayFrom(f, UnixNow());
+    std::wstring hl;
+    if (d0 < f.days) { hl = L"H " + FmtNumber(ToTemp(f.dMax[d0], u), 0, L"") + L"  L " + FmtNumber(ToTemp(f.dMin[d0], u), 0, L""); }
+    const float hlW = hl.empty() ? 0.0f : TextW(g, hl, fSmall);
+    const std::wstring t = FmtTemp(f.temp, u) + L"  " + WeatherText(f.code);
+    DrawTextClip(g, t, fSmall, theme_->textSecondary, RectF(x, y2, r.X + r.Width - pad - hlW - 6.0f * s - x, 18.0f * s));
+    if (!hl.empty()) { PaintText(g, hl, fSmall, theme_->textMuted, r.X + r.Width - pad - hlW, y2); }
+}
+
+// History tab: last year's mean against the normal, and last season's snow.
+void App::DrawListRow(Graphics& g, const RectF& r, size_t i) {
+    const float s = scale_;
+    const float pad = 10.0f * s;
+    const float y2 = r.Y + 25.0f * s;
+    const Font fSmall = UiFont(8.5f, s);
     const Climate& c = (*climates_)[i];
     if (!HasData(i)) {
         const bool busy = fetcher_.IsPending(KeyFor(cfg_.locs[i]));
@@ -1039,8 +1285,14 @@ void App::OnPaint() {
             g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
             SolidBrush bg(theme_->bg);
             g.FillRectangle(&bg, 0, 0, rc.right, rc.bottom);
-            PaintHeader(g);
-            PaintPanels(g);
+            PaintTabLine(g);
+            if (NowTab()) {
+                PaintNowHeader(g);
+                PaintNow(g);
+            } else {
+                PaintHeader(g);
+                PaintPanels(g);
+            }
             PaintStatus(g);
         }
         BitBlt(hdc, ps.rcPaint.left, ps.rcPaint.top, ps.rcPaint.right - ps.rcPaint.left,
@@ -1311,11 +1563,228 @@ void App::PaintClimate(Graphics& g, const Climate& c) {
     DrawBandChart(g, ToRectF(bottomRect_), bot, scale_);
 }
 
+// ---------------------------------------------------------------------------
+// The Now tab
+
+void App::PaintTabLine(Graphics& g) {
+    SolidBrush b(theme_->grid);
+    g.FillRectangle(&b, ToRectF(tabLine_));
+}
+
+void App::PaintNowHeader(Graphics& g) {
+    const RectF r = ToRectF(headerRect_);
+    const float s = scale_;
+    const size_t i = cfg_.state.selected;
+    if (i >= cfg_.locCount) { return; }
+    const Units u = cfg_.units;
+    const bool have = HasForecast(i);
+    const float blockW = std::fmax(128.0f * s, std::fmin(168.0f * s, (r.Width - 290.0f * s) / 4.0f));
+    const size_t blocks = have ? 4 : 0;
+    const float nameW = r.Width - blockW * static_cast<float>(blocks) - 12.0f * s;
+    DrawTextClip(g, cfg_.locs[i].name, UiFont(15.0f, s, FontStyleBold), theme_->text, RectF(r.X, r.Y + 4.0f * s, nameW, 30.0f * s));
+    const Font fLine = UiFont(8.5f, s);
+    if (!have) {
+        DrawTextClip(g, L"no forecast yet", fLine, theme_->textSecondary, RectF(r.X, r.Y + 38.0f * s, nameW, 18.0f * s));
+        return;
+    }
+    const Forecast& f = (*forecasts_)[i];
+
+    // "☁ Overcast · 16:00 EST at the place · grid cell at 74 m · updated 21 Nov 2026 16:03"
+    float x = r.X;
+    const std::wstring glyph = WeatherGlyph(f.code, f.isDay);
+    if (!glyph.empty()) {
+        const Font fSym = GlyphFont(10.0f, s);
+        PaintText(g, glyph, fSym, theme_->textSecondary, x, r.Y + 36.0f * s);
+        x += TextW(g, glyph, fSym) + 2.0f * s;
+    }
+    std::wstring line = WeatherText(f.code);
+    line += (line.empty() ? L"" : L" · ") + HourLabel(f.nowTime) + (f.tzAbbrev.empty() ? L"" : L" " + f.tzAbbrev) + L" there";
+    line += L" · updated " + LocalDate(f.fetched);
+    if (!std::isnan(f.elevation)) { line += L" · grid cell at " + std::to_wstring(std::lround(f.elevation)) + L" m"; }
+    DrawTextClip(g, line, fLine, theme_->textSecondary, RectF(x, r.Y + 38.0f * s, nameW - (x - r.X), 18.0f * s));
+
+    // Today, against the month's 1991–2020 normal when the history is here.
+    const size_t d0 = FirstDayFrom(f, UnixNow());
+    const bool today = d0 < f.days;
+    std::wstring normal = L"normal: needs the history";
+    if (today && HasData(i)) {
+        const LocalTime& t = f.dTime[d0];
+        const Climate& c = (*climates_)[i];
+        const double nh = DayNormal(MonthNormals(c, Var::High, kNormal0, kNormal1), t.month, t.day);
+        const double nl = DayNormal(MonthNormals(c, Var::Low, kNormal0, kNormal1), t.month, t.day);
+        normal = L"normal " + FmtNumber(ToTemp(nh, u), 0, L"") + L" / " + FmtNumber(ToTemp(nl, u), 0, TempUnit(u));
+    }
+    std::wstring precipV = L"-";
+    std::wstring precipD;
+    if (today) {
+        const bool snow = f.dSnow[d0] >= 0.1;
+        precipV = snow ? FmtSnowAmount(f.dSnow[d0], u) : FmtRain(f.dPrecip[d0], u);
+        precipD = std::isnan(f.dProb[d0]) ? std::wstring() : L"chance " + FmtNumber(f.dProb[d0], 0, L"%");
+    }
+    const std::wstring cover = f.snowDepth >= 0.5 ? L"snow cover " + FmtSnow(f.snowDepth, u)
+                                                  : L"humidity " + FmtNumber(f.humidity, 0, L"%");
+    precipD += (precipD.empty() ? L"" : L" · ") + cover;
+
+    struct Block { std::wstring k, v, d; };
+    std::array<Block, 4> b;
+    b[0] = { L"Temperature now", FmtTemp(f.temp, u), L"feels like " + FmtTemp(f.feels, u) };
+    b[1] = { L"Today high / low",
+             today ? FmtNumber(ToTemp(f.dMax[d0], u), 0, L"") + L" / " + FmtNumber(ToTemp(f.dMin[d0], u), 0, TempUnit(u)) : L"-",
+             normal };
+    b[2] = { L"Wind", FmtWind(f.wind, u),
+             std::wstring(L"from ") + CompassPoint(f.windDir) + L", gusts " + FmtWind(f.gust, u) };
+    b[3] = { today && f.dSnow[d0] >= 0.1 ? L"Snow today" : L"Precipitation today", precipV, precipD };
+
+    const Font fk = UiFont(8.5f, s);
+    const Font fv = UiFont(14.0f, s, FontStyleBold);
+    const Font fd = UiFont(8.0f, s);
+    Pen sep(theme_->grid, 1.0f);
+    for (size_t k = 0; k < 4; ++k) {
+        const float bx = r.X + r.Width - blockW * static_cast<float>(4 - k);
+        g.DrawLine(&sep, bx, r.Y + 6.0f * s, bx, r.Y + r.Height - 8.0f * s);
+        const float tx = bx + 10.0f * s;
+        const float tw = blockW - 14.0f * s;
+        DrawTextClip(g, b[k].k, fk, theme_->textSecondary, RectF(tx, r.Y + 4.0f * s, tw, 16.0f * s));
+        DrawTextClip(g, b[k].v, fv, theme_->text, RectF(tx, r.Y + 19.0f * s, tw, 26.0f * s));
+        DrawTextClip(g, b[k].d, fd, theme_->textMuted, RectF(tx, r.Y + 46.0f * s, tw, 16.0f * s));
+    }
+}
+
+void App::PaintNow(Graphics& g) {
+    const size_t i = cfg_.state.selected;
+    if (cfg_.locCount == 0) {
+        PaintEmpty(g, L"No places yet. Press Add... and search for a town.");
+        return;
+    }
+    if (!HasForecast(i)) {
+        const bool busy = fetcher_.IsPending(ForecastKeyFor(cfg_.locs[i]));
+        PaintEmpty(g, busy ? L"Fetching the forecast…"
+                           : fcErrors_[i].empty() ? L"No forecast yet. Press Update." : L"Forecast failed: " + fcErrors_[i]);
+        return;
+    }
+    const Forecast& f = (*forecasts_)[i];
+    PaintHours(g, f);
+    PaintDays(g, f, i);
+}
+
+// The next 48 hours: temperature and feels-like, with precipitation in the tooltip.
+void App::PaintHours(Graphics& g, const Forecast& f) {
+    const Units u = cfg_.units;
+    const size_t h0 = FirstHourFrom(f, UnixNow());
+    const size_t n = f.hours - h0;
+    std::array<double, kForecastHours> temp{}, feels{}, prob{}, rain{}, snow{};
+    std::array<std::wstring, kForecastHours> heads{}, ticks{};
+    for (size_t k = 0; k < n; ++k) {
+        const size_t j = h0 + k;
+        const LocalTime& t = f.hTime[j];
+        temp[k]  = ToTemp(f.hTemp[j], u);
+        feels[k] = ToTemp(f.hFeels[j], u);
+        prob[k]  = f.hProb[j];
+        rain[k]  = ToRain(f.hPrecip[j], u);
+        snow[k]  = ToSnow(f.hSnow[j], u);
+        const std::wstring what = WeatherText(f.hCode[j]);
+        heads[k] = DayLabel(t) + L" " + HourLabel(t) + (what.empty() ? L"" : L" · " + what);
+        if (t.hour % 6 == 0) { ticks[k] = t.hour == 0 ? std::wstring(kDayShort[Weekday(t.year, t.month, t.day)]) : HourLabel(t); }
+    }
+    BandChartInput in;
+    in.title = L"Next 48 hours";
+    in.subtitle = L"hourly, local time there" + (f.tzAbbrev.empty() ? std::wstring() : L" (" + f.tzAbbrev + L")");
+    in.axis = XAxis::Custom;
+    in.n = n;
+    in.heads = heads.data();
+    in.ticks = ticks.data();
+    in.unit = TempUnit(u);
+    in.decimals = 1;
+    in.theme = theme_;
+    in.hoverX = hoverX_;
+    in.hoverY = hoverY_;
+    in.empty = L"This forecast is out of date. Press Update.";
+    in.series[0] = { temp.data(), theme_->series2, 2.5f, false, false, true, L"Temperature" };
+    in.series[1] = { feels.data(), theme_->series2Soft, 1.5f, false, false, true, L"Feels like" };
+    in.series[2] = { prob.data(), theme_->text, 0.0f, false, false, true, L"Chance of precipitation", true, L"%", 0 };
+    in.series[3] = { rain.data(), theme_->text, 0.0f, false, false, true, L"Precipitation", true, RainUnit(u), RainDecimals(u) };
+    in.series[4] = { snow.data(), theme_->text, 0.0f, false, false, true, L"Snowfall", true, SnowUnit(u), SnowDecimals(u) + 1 };
+    in.seriesCount = 5;
+    DrawBandChart(g, ToRectF(topRect_), in, scale_);
+}
+
+// The next 16 days: high and low against the month's 1991–2020 normal, with
+// the day's rain or snow and its weather symbol under the axis.
+void App::PaintDays(Graphics& g, const Forecast& f, size_t index) {
+    const Units u = cfg_.units;
+    const size_t d0 = FirstDayFrom(f, UnixNow());
+    const size_t n = f.days - d0;
+    std::array<double, 12> normHi{}, normLo{};
+    normHi.fill(kNaN);
+    normLo.fill(kNaN);
+    if (HasData(index)) {
+        normHi = MonthNormals((*climates_)[index], Var::High, kNormal0, kNormal1);
+        normLo = MonthNormals((*climates_)[index], Var::Low, kNormal0, kNormal1);
+    }
+    std::array<double, kForecastDays> hi{}, lo{}, nhi{}, nlo{}, rain{}, snow{}, prob{};
+    std::array<std::wstring, kForecastDays> heads{}, ticks{}, ticks2{};
+    for (size_t k = 0; k < n; ++k) {
+        const size_t j = d0 + k;
+        const LocalTime& t = f.dTime[j];
+        const size_t m = static_cast<size_t>(t.month - 1);
+        hi[k]   = ToTemp(f.dMax[j], u);
+        lo[k]   = ToTemp(f.dMin[j], u);
+        nhi[k]  = ToTemp(DayNormal(normHi, t.month, t.day), u);
+        nlo[k]  = ToTemp(DayNormal(normLo, t.month, t.day), u);
+        rain[k] = ToRain(f.dPrecip[j], u);
+        snow[k] = ToSnow(f.dSnow[j], u);
+        prob[k] = f.dProb[j];
+        const std::wstring what = WeatherText(f.dCode[j]);
+        heads[k] = (k == 0 ? std::wstring(L"Today, ") : std::wstring()) + DayLabel(t) + L" " + kMonthShort[m] +
+                   (what.empty() ? L"" : L" · " + what);
+        ticks[k] = DayLabel(t);
+        // Under the axis: snow if any fell, else rain, one decimal below 10.
+        std::wstring amount;
+        if (f.dSnow[j] >= 0.1) {
+            amount = FmtNumber(snow[k], u == Units::Metric ? (snow[k] < 10.0 ? 1 : 0) : 1, L"");
+        } else if (f.dPrecip[j] >= 0.1) {
+            amount = FmtNumber(rain[k], u == Units::Metric ? (rain[k] < 10.0 ? 1 : 0) : 2, L"");
+        }
+        ticks2[k] = std::wstring(WeatherGlyph(f.dCode[j], true)) + (amount.empty() ? L"" : L" " + amount);
+    }
+    BandChartInput in;
+    in.title = L"Next 16 days";
+    // Kept short: the legend shares this row.
+    in.subtitle = HasData(index) ? std::wstring(L"dashed: 1991–2020 normal · ") : std::wstring();
+    in.subtitle += u == Units::Metric ? L"rain mm, snow cm" : L"rain, snow in";
+    in.axis = XAxis::Custom;
+    in.n = n;
+    in.heads = heads.data();
+    in.ticks = ticks.data();
+    in.ticks2 = ticks2.data();
+    in.highlight = n > 0 ? 0 : -1;
+    in.unit = TempUnit(u);
+    in.decimals = 1;
+    in.theme = theme_;
+    in.hoverX = hoverX_;
+    in.hoverY = hoverY_;
+    in.empty = L"This forecast is out of date. Press Update.";
+    size_t ns = 0;
+    in.series[ns++] = { hi.data(), theme_->series2, 2.5f, false, false, true, L"High" };
+    in.series[ns++] = { lo.data(), theme_->series1, 2.5f, false, false, true, L"Low" };
+    if (HasData(index)) {
+        in.series[ns++] = { nhi.data(), theme_->series2, 1.5f, false, true, true, L"Normal high" };
+        in.series[ns++] = { nlo.data(), theme_->series1, 1.5f, false, true, true, L"Normal low" };
+    }
+    in.series[ns++] = { prob.data(), theme_->text, 0.0f, false, false, true, L"Chance of precipitation", true, L"%", 0 };
+    in.series[ns++] = { rain.data(), theme_->text, 0.0f, false, false, true, L"Precipitation", true, RainUnit(u), RainDecimals(u) };
+    in.series[ns++] = { snow.data(), theme_->text, 0.0f, false, false, true, L"Snowfall", true, SnowUnit(u), SnowDecimals(u) + 1 };
+    assert(ns <= kMaxChartSeries);
+    in.seriesCount = ns;
+    DrawBandChart(g, ToRectF(bottomRect_), in, scale_);
+}
+
 void App::PaintStatus(Graphics& g) {
     const RectF r = ToRectF(statusRect_);
     const Font f = UiFont(8.5f, scale_);
-    const float cw = TextW(g, kCredit, f);
-    PaintText(g, kCredit, f, theme_->textMuted, r.X + r.Width - cw, r.Y + 2.0f * scale_);
+    const wchar_t* credit = NowTab() ? kCreditNow : kCredit;
+    const float cw = TextW(g, credit, f);
+    PaintText(g, credit, f, theme_->textMuted, r.X + r.Width - cw, r.Y + 2.0f * scale_);
     DrawTextClip(g, status_, f, theme_->textSecondary, RectF(r.X, r.Y + 2.0f * scale_, r.Width - cw - 16.0f * scale_, r.Height));
 }
 

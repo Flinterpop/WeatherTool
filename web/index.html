@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Weather History</title>
+<title>WeatherTool</title>
 <style>
 :root {
   color-scheme: light;
@@ -71,13 +71,19 @@ th, td { padding: 3px 12px; text-align: right; border-bottom: 1px solid var(--gr
 th { color: var(--text-secondary); font-weight: 600; }
 .tablewrap { max-height: 420px; overflow: auto; }
 .empty { color: var(--text-secondary); padding: 40px 0; text-align: center; }
+.tabs { display: inline-flex; gap: 4px; }
+.tabs button { border: 0; border-bottom: 3px solid transparent; border-radius: 0; background: none; padding: 4px 12px; font-size: 15px; color: var(--text-secondary); }
+.tabs button.on { color: var(--text-primary); font-weight: 600; border-bottom-color: var(--series-1); background: none; }
+.now-line { color: var(--text-secondary); font-size: 13px; margin-top: 12px; }
+.glyph { font-family: "Segoe UI Symbol", "Apple Symbols", system-ui, sans-serif; }
 footer { color: var(--text-muted); font-size: 12px; margin-top: 20px; }
 footer a { color: inherit; }
 </style>
 </head>
 <body>
 <header>
-  <h1>Weather History</h1>
+  <h1>WeatherTool</h1>
+  <div class="tabs" id="tabs"><button data-t="history">History</button><button data-t="now">Now</button></div>
   <form id="searchForm" class="row">
     <input id="q" placeholder="Town or city" size="22" autocomplete="off">
     <button type="submit">Search</button>
@@ -85,12 +91,29 @@ footer a { color: inherit; }
   </form>
   <div id="results"></div>
   <div class="row" style="margin-left:auto">
-    <label>From <select id="start"></select></label>
+    <label id="startLabel">From <select id="start"></select></label>
     <div class="seg" id="units"><button data-u="metric">°C · cm</button><button data-u="imperial">°F · in</button></div>
   </div>
 </header>
 <main>
   <div id="status">Search for a town to begin.</div>
+  <div id="now" hidden>
+    <div class="now-line" id="nowLine"></div>
+    <div class="tiles" id="nowTiles"></div>
+    <div class="card">
+      <h2>Next 48 hours</h2>
+      <div class="sub" id="hourSub">Hourly temperature, local time at the place.</div>
+      <div class="legend" id="hourLegend"></div>
+      <div class="chart" id="hourChart"></div>
+    </div>
+    <div class="card">
+      <h2>Next 16 days</h2>
+      <div class="sub" id="daySub"></div>
+      <div class="legend" id="dayLegend"></div>
+      <div class="chart" id="dayChart"></div>
+    </div>
+    <footer id="nowFooter"></footer>
+  </div>
   <div id="app" hidden>
     <div class="tiles" id="tiles"></div>
 
@@ -161,8 +184,10 @@ const state = {
   loc: null, raw: null, d: null,
   units: load('wh.units') || 'metric',
   start: load('wh.start') || FIRST_YEAR,
-  annMetric: 'mean', month: new Date().getMonth(), heat: 'temp'
+  annMetric: 'mean', month: new Date().getMonth(), heat: 'temp',
+  tab: load('wh.tab') === 'now' ? 'now' : 'history', fc: null, fcError: ''
 };
+const FORECAST_STALE_MS = 14 * 60e3;   // Open-Meteo updates current conditions every 15 minutes
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -181,6 +206,13 @@ const cS = v => v == null ? null : metric() ? v : v / 2.54;         // snowfall
 const fT = v => v == null ? '–' : v.toFixed(1) + ' ' + tU();
 const fDT = v => v == null ? '–' : (v >= 0 ? '+' : '−') + Math.abs(v).toFixed(2) + ' ' + tU();
 const fS = v => v == null ? '–' : (metric() ? v.toFixed(0) : v.toFixed(1)) + ' ' + sU();
+// Forecast quantities: wind km/h (mph), rain mm (in), snowfall cm (in) with one more decimal.
+const fW = v => v == null ? '–' : Math.round(metric() ? v : v / 1.609344) + (metric() ? ' km/h' : ' mph');
+const cR = v => v == null ? null : metric() ? v : v / 25.4;
+const fR = v => v == null ? '–' : (metric() ? cR(v).toFixed(1) + ' mm' : cR(v).toFixed(2) + ' in');
+const fSA = v => v == null ? '–' : (metric() ? v.toFixed(1) : (v / 2.54).toFixed(2)) + ' ' + sU();
+const fT0 = v => v == null ? '–' : String(Math.round(cT(v))).replace('-', '−');
+const compass = d => d == null ? '' : ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round((((d % 360) + 360) % 360) / 45) % 8];
 
 /* ---------- statistics ---------- */
 function mean(a) { let s = 0, n = 0; for (const v of a) if (v != null) { s += v; n++; } return n ? s / n : null; }
@@ -266,7 +298,7 @@ function derive(raw) {
   return {
     y0, y1, years, T, TX, TN, S, season,
     ann: { mean: ann, max: annual(TX), min: annual(TN) },
-    normT: periodMean(T, NORMAL), last10,
+    normT: periodMean(T, NORMAL), normTX: periodMean(TX, NORMAL), normTN: periodMean(TN, NORMAL), last10,
     clim: [OLD_NORMAL, NORMAL, last10].filter(Boolean).map(p => ({ p, t: periodMean(T, p), s: periodMean(S, p) }))
   };
 }
@@ -275,23 +307,94 @@ async function loadLocation(loc) {
   state.loc = loc; save('wh.loc', loc);
   history.replaceState(null, '', '#lat=' + loc.lat + '&lon=' + loc.lon + '&name=' + encodeURIComponent(loc.name));
   $('results').innerHTML = '';
+  // The forecast is small and loads alongside the history, so the Now tab
+  // does not wait for a 1 MB download.
+  state.fc = null; state.fcError = ''; state.raw = null; state.d = null;
+  loadForecast(loc);
+  renderAll();
   const key = loc.lat.toFixed(3) + ',' + loc.lon.toFixed(3);
   const cached = load('wh.data');
+  let raw;
   if (cached && cached.key === key && Date.now() - cached.raw.fetched < CACHE_DAYS * 864e5) {
-    state.raw = cached.raw;
+    raw = cached.raw;
   } else {
-    setStatus('Downloading daily weather since ' + FIRST_YEAR + ' for ' + loc.name + '…');
-    try { state.raw = await fetchHistory(loc); }
-    catch (e) { setStatus('Could not download data: ' + e.message); return; }
-    if (!save('wh.data', { key, raw: state.raw })) console.warn('Could not cache data in localStorage');
+    state.histStatus = 'Downloading daily weather since ' + FIRST_YEAR + ' for ' + loc.name + '…';
+    renderAll();
+    try { raw = await fetchHistory(loc); }
+    catch (e) { state.histStatus = 'Could not download data: ' + e.message; renderAll(); return; }
+    if (!save('wh.data', { key, raw })) console.warn('Could not cache data in localStorage');
   }
-  state.d = derive(state.raw);
+  if (state.loc !== loc) return;   // another place was picked meanwhile
+  state.raw = raw;
+  state.d = derive(raw);
   buildStartSelect();
-  $('app').hidden = false;
-  const r = state.raw;
-  setStatus(loc.name + ' · ' + r.lat.toFixed(2) + '°, ' + r.lon.toFixed(2) + '° · grid elevation ' + Math.round(r.elev) + ' m · data ' +
-    state.d.y0 + '–' + state.d.y1 + ' (fetched ' + new Date(r.fetched).toLocaleDateString() + ')');
+  state.histStatus = loc.name + ' · ' + raw.lat.toFixed(2) + '°, ' + raw.lon.toFixed(2) + '° · grid elevation ' + Math.round(raw.elev) + ' m · data ' +
+    state.d.y0 + '–' + state.d.y1 + ' (fetched ' + new Date(raw.fetched).toLocaleDateString() + ')';
   renderAll();
+}
+
+/* ---------- forecast ---------- */
+const WMO = { 0: 'Clear sky', 1: 'Mainly clear', 2: 'Partly cloudy', 3: 'Overcast', 45: 'Fog', 48: 'Freezing fog',
+  51: 'Light drizzle', 53: 'Drizzle', 55: 'Heavy drizzle', 56: 'Light freezing drizzle', 57: 'Freezing drizzle',
+  61: 'Light rain', 63: 'Rain', 65: 'Heavy rain', 66: 'Light freezing rain', 67: 'Freezing rain',
+  71: 'Light snow', 73: 'Snow', 75: 'Heavy snow', 77: 'Snow grains', 80: 'Light showers', 81: 'Showers', 82: 'Heavy showers',
+  85: 'Light snow showers', 86: 'Snow showers', 95: 'Thunderstorm', 96: 'Thunderstorm, hail', 99: 'Thunderstorm, heavy hail' };
+const wText = c => WMO[c] || '';
+function wGlyph(c, day) {   // the same symbols as the desktop app
+  if (c === 0 || c === 1) return day ? '☀' : '☾';
+  if (c === 2) return day ? '⛅' : '☁';
+  if (c === 3) return '☁';
+  if (c === 45 || c === 48) return '≡';
+  if ((c >= 71 && c <= 77) || c === 85 || c === 86) return '❄';
+  if (c >= 95) return '⚡';
+  if (c >= 51 && c <= 82) return '☂';
+  return '';
+}
+const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+// Provider times are local to the place: read them as UTC and compare with now + utc_offset.
+const localMs = s => Date.UTC(+s.slice(0, 4), +s.slice(5, 7) - 1, +s.slice(8, 10), +(s.slice(11, 13) || 0), +(s.slice(14, 16) || 0));
+const dayLab = s => { const d = new Date(localMs(s)); return DAYS[d.getUTCDay()] + ' ' + d.getUTCDate(); };
+
+async function fetchForecast(loc) {
+  const url = 'https://api.open-meteo.com/v1/forecast?latitude=' + loc.lat + '&longitude=' + loc.lon +
+    '&current=temperature_2m,apparent_temperature,relative_humidity_2m,precipitation,snowfall,snow_depth,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m,is_day' +
+    '&hourly=temperature_2m,apparent_temperature,precipitation_probability,precipitation,snowfall,weather_code' +
+    '&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,snowfall_sum,precipitation_probability_max' +
+    '&timezone=auto&forecast_days=16&forecast_hours=48';
+  const r = await fetch(url);
+  if (!r.ok) {
+    let msg = 'HTTP ' + r.status;
+    try { msg = (await r.json()).reason || msg; } catch (e) { /* keep status */ }
+    throw new Error(msg);
+  }
+  const j = await r.json();
+  if (!j.current || !j.hourly || !j.daily) throw new Error('reply has no forecast');
+  return { j, fetched: Date.now() };
+}
+
+async function loadForecast(loc) {
+  state.fcBusy = true;
+  try {
+    const fc = await fetchForecast(loc);
+    if (state.loc !== loc) return;
+    state.fc = fc; state.fcError = '';
+  } catch (e) {
+    if (state.loc !== loc) return;
+    state.fcError = 'Could not fetch the forecast: ' + e.message;
+  } finally {
+    state.fcBusy = false;
+  }
+  renderAll();
+}
+
+// A day's normal from the monthly normals, interpolated between mid-month
+// values (as the desktop app does), so it does not step at a month boundary.
+function dayNormal(monthly, s) {
+  const mo = +s.slice(5, 7) - 1, d = +s.slice(8, 10);
+  const dim = new Date(Date.UTC(2001, mo + 1, 0)).getUTCDate();   // a common year is close enough
+  const p = mo + (Math.min(d, dim) - 0.5) / dim - 0.5, fl = Math.floor(p), f = p - fl;
+  const lo = (fl + 12) % 12, hi = (lo + 1) % 12;
+  return monthly[lo] == null || monthly[hi] == null ? null : monthly[lo] * (1 - f) + monthly[hi] * f;
 }
 
 /* ---------- location search ---------- */
@@ -343,7 +446,7 @@ function legend(host, series) {
 // Index-banded chart: x is position 0..n-1, series are 'line' or 'bar'.
 function drawChart(host, cfg) {
   host.innerHTML = '';
-  const W = Math.max(300, host.clientWidth), H = cfg.height || 250, m = { l: 46, r: 10, t: 8, b: 24 };
+  const W = Math.max(300, host.clientWidth), H = cfg.height || 250, m = { l: 46, r: 10, t: 8, b: cfg.xTick2 ? 40 : 24 };
   const n = cfg.n, pw = W - m.l - m.r, ph = H - m.t - m.b, step = pw / n;
   const vals = []; for (const s of cfg.series) for (const v of s.values) if (v != null && isFinite(v)) vals.push(v);
   if (!vals.length) { host.innerHTML = '<div class="empty">No data for this selection.</div>'; return; }
@@ -359,10 +462,14 @@ function drawChart(host, cfg) {
     el('line', { x1: m.l, x2: W - m.r, y1: Y(t), y2: Y(t), style: 'stroke:var(--grid)', 'stroke-width': 1 }, svg);
     el('text', { x: m.l - 6, y: Y(t) + 3.5, 'text-anchor': 'end' }, svg).textContent = cfg.yTick ? cfg.yTick(t) : t;
   }
+  if (cfg.highlight != null) el('rect', { x: X(cfg.highlight) - step / 2, y: m.t, width: step, height: ph, style: 'fill:var(--guide)' }, svg);
   for (let i = 0; i < n; i++) {
+    // A second line under the axis (the 16-day chart's weather and rain or snow).
+    const lab2 = cfg.xTick2 ? cfg.xTick2(i) : null;
+    if (lab2) el('text', { x: X(i), y: H - 4, 'text-anchor': 'middle', class: 'glyph', style: 'fill:var(--text-secondary)' }, svg).textContent = lab2;
     const lab = cfg.xTick(i); if (lab == null) continue;
     el('line', { x1: X(i), x2: X(i), y1: H - m.b, y2: H - m.b + 4, style: 'stroke:var(--text-muted)' }, svg);
-    el('text', { x: X(i), y: H - 6, 'text-anchor': 'middle' }, svg).textContent = lab;
+    el('text', { x: X(i), y: H - m.b + 18, 'text-anchor': 'middle' }, svg).textContent = lab;
   }
   const guide = el('rect', { y: m.t, height: ph, width: Math.max(step, 2), style: 'fill:var(--guide)', visibility: 'hidden' }, svg);
 
@@ -597,9 +704,114 @@ function renderTable() {
   $('table').innerHTML = '<table><thead><tr><th>Year</th><th>Mean</th><th>Avg high</th><th>Avg low</th><th>Season</th><th>Snowfall</th></tr></thead><tbody>' + rows.join('') + '</tbody></table>';
 }
 
+/* ---------- the Now tab ---------- */
+const hhmm = s => s.slice(11, 16);
+function firstFrom(times, spanMs) {   // the first slot not yet over at the place
+  const nowLocal = Date.now() + state.fc.j.utc_offset_seconds * 1000;
+  let i = 0;
+  while (i < times.length && localMs(times[i]) + spanMs <= nowLocal) i++;
+  return i;
+}
+const tipRows = rows => rows.map(([k, v]) => '<div>' + esc(k) + '<span class="val">' + esc(v) + '</span></div>').join('');
+
+function renderNowTiles() {
+  const j = state.fc.j, c = j.current, dl = j.daily, d0 = firstFrom(dl.time, 864e5), today = d0 < dl.time.length;
+  const tz = j.timezone_abbreviation || '';
+  $('nowLine').innerHTML = '<span class="glyph">' + wGlyph(c.weather_code, c.is_day === 1) + '</span> ' +
+    esc([wText(c.weather_code), hhmm(c.time) + (tz ? ' ' + tz : '') + ' there',
+      'updated ' + new Date(state.fc.fetched).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      'grid cell at ' + Math.round(j.elevation) + ' m'].filter(Boolean).join(' · '));
+  let normal = 'normal: once the history has loaded';
+  if (today && state.d) {
+    const t = dl.time[d0];
+    normal = 'normal ' + fT0(dayNormal(state.d.normTX, t)) + ' / ' + fT0(dayNormal(state.d.normTN, t)) + ' ' + tU() + ' (1991–2020)';
+  }
+  const snowy = today && dl.snowfall_sum[d0] >= 0.1;
+  const depth = c.snow_depth == null ? null : c.snow_depth * 100;
+  const cover = depth != null && depth >= 0.5 ? 'snow cover ' + fS(cS(depth)) : 'humidity ' + c.relative_humidity_2m + '%';
+  $('nowTiles').innerHTML =
+    tile('Temperature now', fT(cT(c.temperature_2m)), 'feels like ' + fT(cT(c.apparent_temperature))) +
+    tile('Today high / low', today ? fT0(dl.temperature_2m_max[d0]) + ' / ' + fT0(dl.temperature_2m_min[d0]) + ' ' + tU() : '–', normal) +
+    tile('Wind', fW(c.wind_speed_10m), 'from ' + compass(c.wind_direction_10m) + ', gusts ' + fW(c.wind_gusts_10m)) +
+    tile(snowy ? 'Snow today' : 'Precipitation today', today ? (snowy ? fSA(dl.snowfall_sum[d0]) : fR(dl.precipitation_sum[d0])) : '–',
+      (today && dl.precipitation_probability_max[d0] != null ? 'chance ' + dl.precipitation_probability_max[d0] + '% · ' : '') + cover);
+}
+
+function renderHours() {
+  const h = state.fc.j.hourly, h0 = firstFrom(h.time, 36e5), idx = h.time.slice(h0).map((_, k) => h0 + k);
+  const tz = state.fc.j.timezone_abbreviation;
+  $('hourSub').textContent = 'Hourly temperature, local time at the place' + (tz ? ' (' + tz + ')' : '') + '. Hover for rain and snow.';
+  const series = [
+    { label: 'Temperature', kind: 'line', values: idx.map(i => cT(h.temperature_2m[i])), color: 'var(--series-2)', width: 2.5 },
+    { label: 'Feels like', kind: 'line', values: idx.map(i => cT(h.apparent_temperature[i])), color: 'var(--series-2-soft)', width: 1.5 }
+  ];
+  legend($('hourLegend'), series);
+  drawChart($('hourChart'), {
+    n: idx.length, series, fmt: fT, height: 260,
+    xFmt: k => { const t = h.time[idx[k]]; return dayLab(t) + ' ' + hhmm(t) + (wText(h.weather_code[idx[k]]) ? ' · ' + wText(h.weather_code[idx[k]]) : ''); },
+    xTick: k => { const t = h.time[idx[k]], hr = +t.slice(11, 13); return hr % 6 ? null : hr === 0 ? dayLab(t).slice(0, 3) : hhmm(t); },
+    tipExtra: k => tipRows([['Chance of precipitation', h.precipitation_probability[idx[k]] + ' %'],
+      ['Precipitation', fR(h.precipitation[idx[k]])], ['Snowfall', fSA(h.snowfall[idx[k]])]])
+  });
+}
+
+function renderDays() {
+  const dl = state.fc.j.daily, d0 = firstFrom(dl.time, 864e5), idx = dl.time.slice(d0).map((_, k) => d0 + k), d = state.d;
+  $('daySub').textContent = 'Daily high and low' + (d ? ', dashed: the 1991–2020 normal for the time of year' : '') +
+    '. Under each day: ' + (metric() ? 'rain in mm, or snow in cm.' : 'rain or snow in inches.');
+  const series = [
+    { label: 'High', kind: 'line', values: idx.map(i => cT(dl.temperature_2m_max[i])), color: 'var(--series-2)', width: 2.5 },
+    { label: 'Low', kind: 'line', values: idx.map(i => cT(dl.temperature_2m_min[i])), color: 'var(--series-1)', width: 2.5 }
+  ];
+  if (d) {
+    series.push({ label: 'Normal high', kind: 'line', values: idx.map(i => cT(dayNormal(d.normTX, dl.time[i]))), color: 'var(--series-2)', width: 1.5, dash: '5 4' });
+    series.push({ label: 'Normal low', kind: 'line', values: idx.map(i => cT(dayNormal(d.normTN, dl.time[i]))), color: 'var(--series-1)', width: 1.5, dash: '5 4' });
+  }
+  const amount = i => {   // snow if any fell, else rain; one decimal below 10
+    const sn = dl.snowfall_sum[i], pr = dl.precipitation_sum[i];
+    if (sn >= 0.1) { const v = cS(sn); return metric() ? v.toFixed(v < 10 ? 1 : 0) : v.toFixed(1); }
+    if (pr >= 0.1) { const v = cR(pr); return metric() ? v.toFixed(v < 10 ? 1 : 0) : v.toFixed(2); }
+    return '';
+  };
+  legend($('dayLegend'), series);
+  drawChart($('dayChart'), {
+    n: idx.length, series, fmt: fT, height: 280, highlight: 0,
+    xFmt: k => (k === 0 ? 'Today, ' : '') + dayLab(dl.time[idx[k]]) + ' ' + MONTHS[+dl.time[idx[k]].slice(5, 7) - 1] +
+      (wText(dl.weather_code[idx[k]]) ? ' · ' + wText(dl.weather_code[idx[k]]) : ''),
+    xTick: k => dayLab(dl.time[idx[k]]),
+    xTick2: k => { const a = amount(idx[k]); return wGlyph(dl.weather_code[idx[k]], true) + (a ? ' ' + a : ''); },
+    tipExtra: k => tipRows([['Chance of precipitation', dl.precipitation_probability_max[idx[k]] + ' %'],
+      ['Precipitation', fR(dl.precipitation_sum[idx[k]])], ['Snowfall', fSA(dl.snowfall_sum[idx[k]])]])
+  });
+}
+
+function renderNowTab() {
+  const has = state.loc && state.fc;
+  $('now').hidden = !has;
+  if (!state.loc) { setStatus('Search for a town to begin.'); return; }
+  if (!state.fc) { setStatus(state.fcError || 'Fetching the forecast for ' + state.loc.name + '…'); return; }
+  setStatus(state.loc.name + (state.fcError ? ' · ' + state.fcError + '; showing the last forecast' : ''));
+  renderNowTiles(); renderHours(); renderDays();
+  $('nowFooter').innerHTML = 'Forecast: <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo.com</a> ' +
+    'forecast API, from national weather services’ models (CC BY 4.0). Values are for a model grid cell, not a weather station. ' +
+    'Refreshed every 15 minutes while this tab is open.';
+}
+
+function refreshForecastIfStale() {
+  if (state.tab !== 'now' || !state.loc || state.fcBusy || document.visibilityState !== 'visible') return;
+  if (state.fc && Date.now() - state.fc.fetched < FORECAST_STALE_MS) return;
+  loadForecast(state.loc);
+}
+
 function renderAll() {
-  if (!state.d) return;
+  for (const b of $('tabs').children) b.classList.toggle('on', b.dataset.t === state.tab);
   for (const b of $('units').children) b.classList.toggle('on', b.dataset.u === state.units);
+  $('startLabel').hidden = state.tab === 'now';
+  if (state.tab === 'now') { $('app').hidden = true; renderNowTab(); return; }
+  $('now').hidden = true;
+  setStatus(state.histStatus || (state.loc ? '' : 'Search for a town to begin.'));
+  $('app').hidden = !state.d;
+  if (!state.d) return;
   for (const b of $('annMetric').children) b.classList.toggle('on', b.dataset.k === state.annMetric);
   for (const b of $('heatSel').children) b.classList.toggle('on', b.dataset.h === state.heat);
   for (const b of $('monthSel').children) b.classList.toggle('on', +b.dataset.m === state.month);
@@ -630,6 +842,13 @@ $('monthSel').innerHTML = MONTHS.map((m, i) => '<button data-m="' + i + '">' + m
 $('monthSel').onclick = e => { if (e.target.dataset.m != null) { state.month = +e.target.dataset.m; renderAll(); } };
 $('annMetric').onclick = e => { if (e.target.dataset.k) { state.annMetric = e.target.dataset.k; renderAll(); } };
 $('heatSel').onclick = e => { if (e.target.dataset.h) { state.heat = e.target.dataset.h; renderAll(); } };
+$('tabs').onclick = e => {
+  if (!e.target.dataset.t) return;
+  state.tab = e.target.dataset.t; save('wh.tab', state.tab);
+  refreshForecastIfStale(); renderAll();
+};
+setInterval(refreshForecastIfStale, 60e3);
+document.addEventListener('visibilitychange', refreshForecastIfStale);
 $('units').onclick = e => { if (e.target.dataset.u) { state.units = e.target.dataset.u; save('wh.units', state.units); renderAll(); } };
 $('start').onchange = e => { state.start = +e.target.value; save('wh.start', state.start); renderAll(); };
 $('searchForm').onsubmit = e => { e.preventDefault(); const q = $('q').value.trim(); if (q) search(q); };
@@ -652,8 +871,10 @@ function locFromHash() {
   if (!isFinite(lat) || !isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
   return { name: h.get('name') || lat.toFixed(2) + ', ' + lon.toFixed(2), lat, lon };
 }
+// #...&tab=now opens on the Now tab (a bookmark for a phone's home screen).
+if (/(^|[#&])tab=now(&|$)/.test(location.hash)) state.tab = 'now';
 const saved = locFromHash() || load('wh.loc');
-if (saved) loadLocation(saved);
+if (saved) loadLocation(saved); else renderAll();
 </script>
 </body>
 </html>

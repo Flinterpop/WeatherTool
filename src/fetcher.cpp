@@ -70,6 +70,35 @@ bool Fetcher::QueueSearch(HWND notify, uint64_t seq, const std::wstring& url) {
     return true;
 }
 
+bool Fetcher::QueueForecast(HWND notify, const std::wstring& key, const std::wstring& url) {
+    assert(notify != nullptr && !key.empty());
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (jobs_.size() >= kMaxJobs || stop_) { return false; }
+        for (const Job& q : jobs_) {
+            if (q.kind == Kind::Forecast && q.key == key) { return true; }   // already queued
+        }
+        auto at = jobs_.begin();
+        while (at != jobs_.end() && at->kind != Kind::Archive) { ++at; }
+        Job j;
+        j.kind = Kind::Forecast;
+        j.notify = notify;
+        j.key = key;
+        j.url = url;
+        jobs_.insert(at, std::move(j));   // after searches and other forecasts, before history downloads
+    }
+    cv_.notify_one();
+    return true;
+}
+
+bool Fetcher::TakeForecast(ForecastResult& out) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (forecasts_.empty()) { return false; }
+    out = std::move(forecasts_.front());
+    forecasts_.pop_front();
+    return true;
+}
+
 bool Fetcher::TakeArchive(ArchiveResult& out) {
     std::lock_guard<std::mutex> lock(mu_);
     if (archives_.empty()) { return false; }
@@ -90,14 +119,14 @@ bool Fetcher::IsPending(const std::wstring& key) const {
     std::lock_guard<std::mutex> lock(mu_);
     if (inFlight_ == key) { return true; }
     for (const Job& j : jobs_) {
-        if (j.kind == Kind::Archive && j.key == key) { return true; }
+        if (j.kind != Kind::Search && j.key == key) { return true; }
     }
     return false;
 }
 
 size_t Fetcher::PendingArchives() const {
     std::lock_guard<std::mutex> lock(mu_);
-    size_t n = inFlight_.empty() ? 0 : 1;
+    size_t n = (inFlight_.empty() || !inFlightArchive_) ? 0 : 1;
     for (const Job& j : jobs_) { n += (j.kind == Kind::Archive) ? 1 : 0; }
     return n;
 }
@@ -112,10 +141,15 @@ void Fetcher::Run() {
             if (stop_) { return; }
             job = std::move(jobs_.front());
             jobs_.pop_front();
-            if (job.kind == Kind::Archive) { inFlight_ = job.key; }
+            if (job.kind != Kind::Search) {
+                inFlight_ = job.key;
+                inFlightArchive_ = job.kind == Kind::Archive;
+            }
         }
         if (job.kind == Kind::Archive) {
             RunArchive(job, http);
+        } else if (job.kind == Kind::Forecast) {
+            RunForecast(job, http);
         } else {
             RunSearch(job, http);
         }
@@ -161,14 +195,7 @@ void Fetcher::RunArchive(const Job& job, HttpClient& http) {
             if (!got || hr.status != 429) { break; }
             const uint32_t wait = (hr.retryAfter == 0 ? 60u : hr.retryAfter) + 2u;
             if (wait > kMaxRetryWait || attempt + 1 == kMaxAttempts) {
-                blockedUntil_ = GetTickCount64() + static_cast<ULONGLONG>(wait) * 1000u;
-                SYSTEMTIME t{};
-                GetLocalTime(&t);
-                const unsigned mins = t.wHour * 60u + t.wMinute + (wait + 59u) / 60u;
-                std::array<wchar_t, 96> b{};
-                swprintf_s(b.data(), b.size(), L"Open-Meteo request limit reached; updates resume after %02u:%02u",
-                           (mins / 60u) % 24u, mins % 60u);
-                blockedNote_ = b.data();
+                NoteRateLimit(wait);
                 break;
             }
             ArchiveResult note;
@@ -202,6 +229,54 @@ void Fetcher::RunArchive(const Job& job, HttpClient& http) {
         inFlight_.clear();
     }
     PushArchive(job.notify, std::move(r));
+}
+
+void Fetcher::NoteRateLimit(uint32_t wait) {
+    assert(wait > 0);
+    blockedUntil_ = GetTickCount64() + static_cast<ULONGLONG>(wait) * 1000u;
+    SYSTEMTIME t{};
+    GetLocalTime(&t);
+    const unsigned mins = t.wHour * 60u + t.wMinute + (wait + 59u) / 60u;
+    std::array<wchar_t, 96> b{};
+    swprintf_s(b.data(), b.size(), L"Open-Meteo request limit reached; updates resume after %02u:%02u",
+               (mins / 60u) % 24u, mins % 60u);
+    blockedNote_ = b.data();
+}
+
+// One attempt, no retries: the next periodic refresh is only minutes away.
+// A rate-limit reply still blocks later requests the same way as above.
+void Fetcher::RunForecast(const Job& job, HttpClient& http) {
+    ForecastResult r;
+    r.key = job.key;
+    HttpResult hr;
+    std::wstring err;
+    if (GetTickCount64() < blockedUntil_) {
+        err = blockedNote_;
+    } else if (http.Get(job.url, buf_.get(), kHttpBufSize, hr, err)) {
+        const std::string_view body(buf_.get(), hr.length);
+        if (hr.status == 429) {
+            const uint32_t wait = (hr.retryAfter == 0 ? 60u : hr.retryAfter) + 2u;
+            NoteRateLimit(wait);
+            err = blockedNote_;
+        } else {
+            auto data = std::make_unique<Forecast>();
+            if (ParseForecast(body, *data, err) && hr.status == 200) {
+                r.ok = true;
+                r.data = std::move(data);
+                r.body.assign(body.data(), body.size());
+            } else if (hr.status != 200) {
+                err = L"HTTP " + std::to_wstring(hr.status) + (err.empty() ? std::wstring() : L": " + err);
+            }
+        }
+    }
+    r.error = err;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        inFlight_.clear();
+        if (forecasts_.size() >= kMaxResults) { forecasts_.pop_front(); }
+        forecasts_.push_back(std::move(r));
+    }
+    PostMessageW(job.notify, WM_APP_FORECAST, 0, 0);
 }
 
 void Fetcher::RunSearch(const Job& job, HttpClient& http) {

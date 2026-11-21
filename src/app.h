@@ -1,5 +1,6 @@
-// Main window: places list, view toolbar, header figures, two chart panels
-// (temperature above, snowfall below) and a status line.
+// Main window: places list, History / Now tabs, view toolbar, header
+// figures, two chart panels (History: temperature above, snowfall below;
+// Now: the next 48 hours above, the next 16 days below) and a status line.
 #pragma once
 
 #include "chart.h"
@@ -41,6 +42,7 @@ private:
     void OnMeasureItem(MEASUREITEMSTRUCT* mis) const;
     void OnDrawItem(const DRAWITEMSTRUCT* dis);
     void OnArchiveReady();
+    void OnForecastReady();
 
     // commands
     void OnRemovePlace();
@@ -52,14 +54,19 @@ private:
     std::wstring WebUrls() const;            // "http://192.168.1.10:8765/" etc.
     void SelectPlace(size_t index);
     void SetView(int view);
+    void SetTab(int tab);
+    bool NowTab() const { return cfg_.state.tab == static_cast<int>(Tab::Now); }
 
     // data
     void LoadCaches();
     void ScheduleUpdates(bool force);
     bool QueueUpdate(size_t index, bool full);
+    void ScheduleForecasts(bool force);
     std::wstring KeyFor(const Location& loc) const;
+    std::wstring ForecastKeyFor(const Location& loc) const;
     int  FromYear(const Climate& c) const;    // first year shown under the current range
     bool HasData(size_t index) const;
+    bool HasForecast(size_t index) const;
 
     // ui
     void CreateControls();
@@ -79,6 +86,14 @@ private:
     void PaintHeatmaps(Gdiplus::Graphics& g, const Climate& c);
     void PaintClimate(Gdiplus::Graphics& g, const Climate& c);
     void PaintEmpty(Gdiplus::Graphics& g, const std::wstring& text);
+    void PaintNowHeader(Gdiplus::Graphics& g);
+    void PaintNow(Gdiplus::Graphics& g);
+    void PaintHours(Gdiplus::Graphics& g, const Forecast& f);
+    void PaintDays(Gdiplus::Graphics& g, const Forecast& f, size_t index);
+    void PaintTabLine(Gdiplus::Graphics& g);
+    void DrawTab(const DRAWITEMSTRUCT* dis);
+    void DrawListRow(Gdiplus::Graphics& g, const Gdiplus::RectF& r, size_t index);
+    void DrawListRowNow(Gdiplus::Graphics& g, const Gdiplus::RectF& r, size_t index);
     void EnsureBackBuffer(HDC hdc, int w, int h);
     void FreeBackBuffer();
 
@@ -89,6 +104,7 @@ private:
     HWND      hRemove_ = nullptr;
     HWND      hUpdate_ = nullptr;
     HWND      hUnits_ = nullptr;
+    std::array<HWND, kTabCount> hTabs_{};
     std::array<HWND, kViewCount> hViews_{};
     std::array<HWND, kRangeYears.size()> hRanges_{};
     std::array<HWND, 3> hMeasures_{};
@@ -105,6 +121,7 @@ private:
     int     bufW_ = 0;
     int     bufH_ = 0;
 
+    RECT tabLine_{};      // the rule under the History / Now tabs
     RECT headerRect_{};
     RECT topRect_{};      // temperature panel
     RECT bottomRect_{};   // snowfall panel
@@ -118,6 +135,8 @@ private:
     WebContent   webContent_;   // views into the exe's resources
     std::unique_ptr<std::array<Climate, kMaxLocations>>      climates_;
     std::array<std::wstring, kMaxLocations>                  errors_{};
+    std::unique_ptr<std::array<Forecast, kMaxLocations>>     forecasts_;
+    std::array<std::wstring, kMaxLocations>                  fcErrors_{};
     std::wstring status_;
     float scale_  = 1.0f;
     int   hoverX_ = -1;

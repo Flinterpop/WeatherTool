@@ -37,6 +37,25 @@ std::wstring FmtDelta(double dc, Units u, int decimals) { return FmtNumber(ToDel
 std::wstring FmtSnow(double cm, Units u) { return FmtNumber(ToSnow(cm, u), SnowDecimals(u), SnowUnit(u)); }
 std::wstring FmtSnowDelta(double cm, Units u) { return FmtNumber(ToSnow(cm, u), SnowDecimals(u) + 1, SnowUnit(u), true); }
 
+double ToWind(double kmh, Units u) { return u == Units::Metric ? kmh : kmh / 1.609344; }
+double ToRain(double mm, Units u)  { return u == Units::Metric ? mm : mm / 25.4; }
+const wchar_t* WindUnit(Units u)   { return u == Units::Metric ? L"km/h" : L"mph"; }
+const wchar_t* RainUnit(Units u)   { return u == Units::Metric ? L"mm" : L"in"; }
+int            RainDecimals(Units u) { return u == Units::Metric ? 1 : 2; }
+
+std::wstring FmtWind(double kmh, Units u)      { return FmtNumber(ToWind(kmh, u), 0, WindUnit(u)); }
+std::wstring FmtRain(double mm, Units u)       { return FmtNumber(ToRain(mm, u), RainDecimals(u), RainUnit(u)); }
+std::wstring FmtSnowAmount(double cm, Units u) { return FmtNumber(ToSnow(cm, u), SnowDecimals(u) + 1, SnowUnit(u)); }
+
+const wchar_t* CompassPoint(double degrees) {
+    static constexpr const wchar_t* kPoints[8] = { L"N", L"NE", L"E", L"SE", L"S", L"SW", L"W", L"NW" };
+    if (std::isnan(degrees)) { return L""; }
+    const double d = std::fmod(std::fmod(degrees, 360.0) + 360.0, 360.0);
+    const size_t k = static_cast<size_t>(std::lround(d / 45.0)) % 8u;
+    assert(k < 8);
+    return kPoints[k];
+}
+
 std::wstring SeasonLabel(int startYear) {
     std::array<wchar_t, 16> b{};
     swprintf_s(b.data(), b.size(), L"%d–%02d", startYear, (startYear + 1) % 100);

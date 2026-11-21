@@ -391,6 +391,19 @@ std::array<double, 12> MonthNormals(const Climate& c, Var var, int y0, int y1) {
     return out;
 }
 
+double DayNormal(const std::array<double, 12>& monthly, int month, int day) {
+    assert(month >= 1 && month <= 12);
+    const int dim = DaysInMonth(2001, month - 1);   // a common year is close enough here
+    assert(day >= 1 && day <= 31);
+    // Position in months, where k is the middle of month k (0-based).
+    const double p = (month - 1) + (std::fmin(day, dim) - 0.5) / dim - 0.5;
+    const double fl = std::floor(p);
+    const double f = p - fl;
+    const int lo = (static_cast<int>(fl) + 12) % 12;   // p can be -0.5 (early January)
+    const int hi = (lo + 1) % 12;
+    return monthly[static_cast<size_t>(lo)] * (1.0 - f) + monthly[static_cast<size_t>(hi)] * f;
+}
+
 double PeriodMean(const YearSeries& s, int y0, int y1) {
     double sum = 0.0;
     int n = 0;

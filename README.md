@@ -8,7 +8,7 @@
 
 *Last updated: 21 Nov 2026*
 
-A Win32 C++ desktop app that shows **historical temperature and snowfall** for the places you choose, from 1940 to last month, as annual and monthly trends. It follows StockTool's layout: a list of places on the left, view buttons and a header with the headline figures across the top, and two charts (temperature above, snowfall below) with a hover tooltip. Plain Win32, GDI+ and WinHTTP; no frameworks and no third-party libraries.
+A Win32 C++ desktop app that shows **historical temperature and snowfall** for the places you choose, from 1940 to last month, as annual and monthly trends, and on a second tab **the weather now and the forecast**. It follows StockTool's layout: a list of places on the left, the History and Now tabs, view buttons and a header with the headline figures across the top, and two charts with a hover tooltip. Plain Win32, GDI+ and WinHTTP; no frameworks and no third-party libraries.
 
 ## Installing
 
@@ -19,7 +19,7 @@ Each [release](https://github.com/Flinterpop/WeatherTool/releases/latest) ships 
 
 Each release's notes list the SHA-256 of every file.
 
-## Views
+## History tab
 
 | View | Temperature (top) | Snowfall (bottom) |
 |---|---|---|
@@ -35,9 +35,19 @@ Each release's notes list the SHA-256 of every file.
 - **°F / in** (or View > Imperial) switches units; View > Theme picks system, light or dark.
 - File > Export writes the selected place's monthly data as CSV (°C and cm).
 
+## Now tab
+
+The weather now and the forecast for the selected place. Ctrl+Tab switches between the tabs, and Ctrl+1 to Ctrl+4 go back to a History view.
+
+- **Header:** the temperature and feels-like now, today's high and low against the 1991–2020 normal for the time of year, the wind (speed, direction, gusts), and today's rain or snow with its chance, plus the snow on the ground (or the humidity when there is none). The line under the name gives the conditions, the time at the place and when the forecast was fetched.
+- **Next 48 hours:** hourly temperature and feels-like, in the place's local time. The tooltip adds the conditions, the chance of precipitation, the amount, and the snowfall.
+- **Next 16 days:** the daily high and low, with the 1991–2020 normal high and low dashed. The normal comes from the place's own history (each month's average, interpolated between mid-month values so it changes smoothly), so it appears once the history has downloaded. Under each day: a weather symbol and the rain (mm) or snow (cm) expected. Today is shaded.
+- **The list** shows each place's temperature and conditions now, and today's high and low, instead of last year's figures.
+- **°F / in** switches this tab too, with wind in mph and rain in inches.
+
 ## Web server (for a phone or tablet)
 
-**File > Web server** serves a browser version of WeatherTool to other devices on your network, such as an iPad. The browser version is one HTML page with the same views, compiled into the exe. Tick the menu item and the status line shows the address to open, such as `http://192.168.1.10:8765/`; **File > Open web page in browser** opens it on this PC. The tick is remembered, so the server starts with the app next time.
+**File > Web server** serves a browser version of WeatherTool to other devices on your network, such as an iPad. The browser version is one HTML page with the same views and the same History and Now tabs, compiled into the exe. Adding `&tab=now` to the page's address (after `#lat=…&lon=…&name=…`) opens it on the Now tab, which suits a bookmark on a phone's home screen; the Now tab refreshes itself every 15 minutes while it is open. Tick the menu item and the status line shows the address to open, such as `http://192.168.1.10:8765/`; **File > Open web page in browser** opens it on this PC. The tick is remembered, so the server starts with the app next time.
 
 - The port is 8765 unless `WeatherTool.ini` says otherwise (`[server]` `port=`). If another program already uses the port, WeatherTool says so and leaves the server off.
 - It serves that page and the icon and nothing else: no files from disk, none of the app's settings or cached data, and only GET and HEAD. The page fetches its own data from Open-Meteo, in the browser that opens it. Each browser remembers its own places, in its local storage.
@@ -49,13 +59,14 @@ Data comes from the [Open-Meteo](https://open-meteo.com/) historical weather API
 
 - A month counts only when at most one day is missing, so the current month and the current year are left out until they are complete.
 - The first download for a place fetches every day since 1940 (about 1 MB). After that only the last few months are fetched, re-taking the two latest complete months because ERA5's preliminary values are revised for a while. The app checks for updates at start and every 30 minutes, for places not updated in the last 6 hours; F5 forces it.
+- **The Now tab** uses Open-Meteo's forecast API, which blends national weather services' models for the place. One request per place brings the conditions now, 48 hours and 16 days (about 4 KB). Open-Meteo updates current conditions every 15 minutes, so the app asks at most that often, and only while the Now tab is showing; F5 there forces it. The last reply is kept on disk, so the tab opens with the previous forecast and its time until the new one arrives, and hours and days already past are dropped.
 - **Rate limits.** Open-Meteo's free tier allows 600 calls a minute, 5,000 an hour and 10,000 a day, and a whole-history download counts as roughly 400 calls (measured 21 Nov 2026). Adding several places at once therefore hits the per-minute limit: the app waits out a short `Retry-After` and tries again, up to three times. When the server asks for a longer wait (the hourly or daily limit), the app stops calling Open-Meteo until then, shows the time it will resume, and the next periodic update picks up from there.
 
 ## Where it keeps things
 
 Files only, never the registry:
 
-- A portable copy keeps `WeatherTool.ini` (settings, places, window state) and `cache\` (one CSV of monthly values per place) **beside the exe**.
+- A portable copy keeps `WeatherTool.ini` (settings, places, window state) and `cache\` (one CSV of monthly values per place, and its last forecast reply as `.forecast.json`) **beside the exe**.
 - A copy under Program Files keeps them in **`%ProgramData%\WeatherTool`**.
 - `WEATHERTOOL_DIR` overrides both; the tests and test runs use it so they never touch a real configuration.
 
@@ -71,6 +82,7 @@ cmake --build --preset release
 build\Release\WeatherTool.exe
 build\Release\weathertool_tests.exe          # unit tests (also: ctest --test-dir build -C Release)
 build\Release\weathertool_tests.exe --live   # one real download through the app's HTTP client and parser
+build\Release\weathertool_tests.exe --live-forecast   # the same for one forecast
 ```
 
 The build uses `/W4 /WX /permissive-` and the static CRT, so the exe needs no VC++ redistributable. The UI-free parts (JSON scanning, climate parsing and statistics, cache format, config, units, themes) are a static library, `weathertool_core`, shared by the app and the tests. `--live` is not part of ctest because it needs the network and spends rate-limit allowance.
@@ -104,8 +116,9 @@ It refuses to run over an existing install or data folder, and cleans up after i
 | File | Role |
 |---|---|
 | `src/main.cpp` | Entry point: DPI awareness, GDI+ start/stop, creates `App`. |
-| `src/app.*` | Main window: list, buttons, menus, layout, header figures, the four views, status line, update scheduling. |
+| `src/app.*` | Main window: list, tabs, buttons, menus, layout, header figures, the four History views and the Now tab, status line, update scheduling. |
 | `src/chart.*` | GDI+ renderers: the banded chart (bars and lines per year or month, legend, axes, hover tooltip) and the year-by-month heatmap. |
+| `src/forecast.*` | The forecast reply to a fixed-size `Forecast` (now, 48 hours, 16 days), weather-code names and symbols, and which hours and days are already past. |
 | `src/climate.*` | Archive reply to monthly grid, merging updates, the cache CSV, and the series and statistics (annual and seasonal series, month normals, trends, rolling means). |
 | `src/jsonscan.*` | A small non-recursive JSON scanner for the two Open-Meteo replies. |
 | `src/fetcher.*` | Worker thread with a bounded job queue; archive downloads and place searches; rate-limit handling. |

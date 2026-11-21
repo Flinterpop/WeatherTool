@@ -12,8 +12,11 @@
 
 namespace wt {
 
-enum class XAxis { Years, Seasons, Months };
-constexpr size_t kMaxChartSeries = 4;
+// Custom: the caller labels every slot (`heads` for the tooltip, `ticks`
+// under the axis, an empty tick for none), as the forecast charts do.
+enum class XAxis { Years, Seasons, Months, Custom };
+constexpr size_t kMaxChartSeries = 8;
+constexpr size_t kMaxSlots = kMaxYears;   // the most slots any chart has
 
 struct ChartSeries {
     const double*  v = nullptr;   // `n` values in display units; NaN = gap
@@ -23,6 +26,9 @@ struct ChartSeries {
     bool           dashed = false;
     bool           inTip  = true;
     std::wstring   label;
+    bool           tipOnly = false;          // not drawn, not in the scale or legend: tooltip only
+    const wchar_t* unit = nullptr;           // tooltip unit, when not the chart's
+    int            decimals = -1;            // tooltip decimals, when not the chart's
 };
 
 struct BandChartInput {
@@ -31,6 +37,10 @@ struct BandChartInput {
     XAxis          axis = XAxis::Years;
     int            firstYear = 0; // year of slot 0 (Years / Seasons)
     size_t         n = 0;
+    const std::wstring* heads  = nullptr;   // Custom: n tooltip headings
+    const std::wstring* ticks  = nullptr;   // Custom: n axis labels ("" = none)
+    const std::wstring* ticks2 = nullptr;   // optional second label line under each slot
+    int            highlight = -1;          // slot drawn with a faint band (e.g. today), -1 = none
     std::array<ChartSeries, kMaxChartSeries> series{};
     size_t         seriesCount = 0;
     int            decimals = 1;

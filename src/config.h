@@ -19,8 +19,12 @@ constexpr int kViewCount = 4;
 // Range presets: how many years the trend views show (0 = everything).
 constexpr std::array<int, 4> kRangeYears = { 0, 50, 30, 20 };
 
+enum class Tab : int { History = 0, Now = 1 };
+constexpr int kTabCount = 2;
+
 struct ViewState {
     size_t selected  = 0;
+    int    tab       = 0;     // Tab
     int    view      = 0;     // View
     int    month     = 0;     // 0..11, for View::Month
     int    measure   = 0;     // Var::Mean / High / Low
@@ -59,6 +63,8 @@ std::wstring FormatLocation(const Location& loc);
 
 // Cache file for a place: cacheDir\<lat>_<lon>.csv
 std::wstring CacheFileFor(const Config& cfg, const Location& loc);
+// Its last forecast reply: cacheDir\<lat>_<lon>.forecast.json
+std::wstring ForecastFileFor(const Config& cfg, const Location& loc);
 
 // Whole-file helpers (binary).
 bool ReadFileBytes(const std::wstring& path, std::string& out, size_t maxBytes, std::wstring& err);

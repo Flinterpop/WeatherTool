@@ -6,6 +6,7 @@
 #pragma once
 
 #include "common.h"
+#include "forecast.h"
 
 #include <windows.h>
 
@@ -21,6 +22,7 @@ class HttpClient;
 
 constexpr UINT WM_APP_ARCHIVE = WM_APP + 1;   // an ArchiveResult is ready
 constexpr UINT WM_APP_SEARCH  = WM_APP + 2;   // a SearchResult is ready
+constexpr UINT WM_APP_FORECAST = WM_APP + 3;  // a ForecastResult is ready
 
 struct ArchiveResult {
     std::wstring key;                 // the place's cache key
@@ -32,6 +34,14 @@ struct ArchiveResult {
     uint32_t     elapsedMs = 0;
     size_t       bytes = 0;
     std::unique_ptr<Climate> data;    // the months in the reply (ok only)
+};
+
+struct ForecastResult {
+    std::wstring key;                 // the place's forecast cache key
+    bool         ok = false;
+    std::wstring error;
+    std::string  body;                // the reply as received (ok only), for the cache
+    std::unique_ptr<Forecast> data;   // parsed (ok only)
 };
 
 struct SearchResult {
@@ -54,14 +64,18 @@ public:
 
     bool QueueArchive(HWND notify, const std::wstring& key, const std::wstring& url, bool full);
     bool QueueSearch(HWND notify, uint64_t seq, const std::wstring& url);
+    // Forecasts are small and someone is looking at them: they go ahead of
+    // queued history downloads.
+    bool QueueForecast(HWND notify, const std::wstring& key, const std::wstring& url);
     bool TakeArchive(ArchiveResult& out);
     bool TakeSearch(SearchResult& out);
+    bool TakeForecast(ForecastResult& out);
 
-    bool   IsPending(const std::wstring& key) const;   // queued or in flight
+    bool   IsPending(const std::wstring& key) const;   // archive or forecast, queued or in flight
     size_t PendingArchives() const;
 
 private:
-    enum class Kind { Archive, Search };
+    enum class Kind { Archive, Search, Forecast };
     struct Job {
         Kind         kind = Kind::Archive;
         HWND         notify = nullptr;
@@ -80,13 +94,17 @@ private:
     void PushArchive(HWND notify, ArchiveResult&& r);
     void RunArchive(const Job& job, HttpClient& http);
     void RunSearch(const Job& job, HttpClient& http);
+    void RunForecast(const Job& job, HttpClient& http);
+    void NoteRateLimit(uint32_t waitSeconds);   // worker thread: hold off until then
 
     mutable std::mutex      mu_;
     std::condition_variable cv_;
     std::deque<Job>         jobs_;
     std::deque<ArchiveResult> archives_;
     std::deque<SearchResult>  searches_;
-    std::wstring            inFlight_;    // key of the archive job running now
+    std::deque<ForecastResult> forecasts_;
+    std::wstring            inFlight_;    // key of the archive or forecast job running now
+    bool                    inFlightArchive_ = false;
     bool                    stop_ = false;
     std::thread             worker_;
     std::unique_ptr<char[]> buf_;

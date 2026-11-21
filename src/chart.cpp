@@ -52,8 +52,10 @@ int LabelEvery(float slotPx, float minPx) {
     return 100;
 }
 
-std::wstring SlotLabel(XAxis axis, int firstYear, size_t i) {
-    const int y = firstYear + static_cast<int>(i);
+std::wstring SlotLabel(const BandChartInput& in, size_t i) {
+    const XAxis axis = in.axis;
+    const int y = in.firstYear + static_cast<int>(i);
+    if (axis == XAxis::Custom) { return in.heads != nullptr ? in.heads[i] : std::wstring(); }
     if (axis == XAxis::Months) { return kMonthLong[i % 12]; }
     if (axis == XAxis::Seasons) { return SeasonLabel(y); }
     return std::to_wstring(y);
@@ -153,7 +155,7 @@ void DrawLegend(Graphics& g, const RectF& rc, const BandChartInput& in, float s)
     const float y = rc.Y + 3.0f * s;
     for (size_t k = in.seriesCount; k-- > 0;) {
         const ChartSeries& cs = in.series[k];
-        if (cs.label.empty()) { continue; }
+        if (cs.label.empty() || cs.tipOnly) { continue; }
         const float tw = TextWidth(g, cs.label, f);
         x -= tw;
         Text(g, cs.label, f, in.theme->textSecondary, x, y);
@@ -179,12 +181,15 @@ REAL FontPx(float pt, float scale) {
 
 void DrawBandChart(Graphics& g, const RectF& rc, const BandChartInput& in, float s) {
     assert(in.theme != nullptr);
-    assert(in.n <= kMaxYears);
+    assert(in.n <= kMaxSlots);
+    assert(in.axis != XAxis::Custom || (in.heads != nullptr && in.ticks != nullptr));
     const Theme& th = *in.theme;
     const float titleH = DrawTitleRow(g, rc, in.title, in.subtitle, th, s);
     DrawLegend(g, RectF(rc.X, rc.Y + titleH - 18.0f * s, rc.Width, 18.0f * s), in, s);
 
-    const RectF plot(rc.X + 46.0f * s, rc.Y + titleH + 8.0f * s, rc.Width - 56.0f * s, rc.Height - titleH - 30.0f * s);
+    const float extraLine = in.ticks2 != nullptr ? 15.0f * s : 0.0f;
+    const RectF plot(rc.X + 46.0f * s, rc.Y + titleH + 8.0f * s, rc.Width - 56.0f * s,
+                     rc.Height - titleH - 30.0f * s - extraLine);
     const Font fAxis = MakeFont(8.0f, s);
     if (plot.Width < 40.0f || plot.Height < 30.0f) { return; }
 
@@ -192,6 +197,7 @@ void DrawBandChart(Graphics& g, const RectF& rc, const BandChartInput& in, float
     double lo = 1e300, hi = -1e300;
     bool anyBars = false;
     for (size_t k = 0; k < in.seriesCount; ++k) {
+        if (in.series[k].tipOnly) { continue; }
         anyBars = anyBars || in.series[k].bars;
         for (size_t i = 0; i < in.n; ++i) {
             const double v = in.series[k].v[i];
@@ -237,7 +243,23 @@ void DrawBandChart(Graphics& g, const RectF& rc, const BandChartInput& in, float
     // X labels.
     Pen tick(th.textMuted, 1.0f);
     const float axisY = plot.Y + plot.Height;
-    if (in.axis == XAxis::Months) {
+    if (in.highlight >= 0 && static_cast<size_t>(in.highlight) < in.n) {
+        SolidBrush band(th.guide);
+        g.FillRectangle(&band, X(static_cast<size_t>(in.highlight)) - slot / 2.0f, plot.Y, slot, plot.Height);
+    }
+    if (in.axis == XAxis::Custom) {
+        for (size_t i = 0; i < in.n; ++i) {
+            if (!in.ticks[i].empty()) {
+                g.DrawLine(&tick, X(i), axisY, X(i), axisY + 3.0f * s);
+                TextC(g, in.ticks[i], fAxis, th.textMuted, X(i), axisY + 4.0f * s);
+            }
+            if (in.ticks2 != nullptr && !in.ticks2[i].empty()) {
+                // Segoe UI Symbol: the second line carries weather symbols, and GDI+ has no font fallback.
+                const Font fSym(L"Segoe UI Symbol", FontPx(8.0f, s), FontStyleRegular, UnitPixel);
+                TextC(g, in.ticks2[i], fSym, th.textSecondary, X(i), axisY + 4.0f * s + extraLine);
+            }
+        }
+    } else if (in.axis == XAxis::Months) {
         const bool tiny = slot < 26.0f * s;
         for (size_t i = 0; i < in.n && i < 12; ++i) {
             const std::wstring t = tiny ? std::wstring(1, kMonthShort[i][0]) : std::wstring(kMonthShort[i]);
@@ -265,7 +287,7 @@ void DrawBandChart(Graphics& g, const RectF& rc, const BandChartInput& in, float
 
     // Bars (grouped when several series are bars).
     size_t nb = 0;
-    for (size_t k = 0; k < in.seriesCount; ++k) { nb += in.series[k].bars ? 1 : 0; }
+    for (size_t k = 0; k < in.seriesCount; ++k) { nb += (in.series[k].bars && !in.series[k].tipOnly) ? 1 : 0; }
     if (nb > 0) {
         const float group = slot * (nb > 1 ? 0.8f : 0.7f);
         const float bw = group / static_cast<float>(nb);
@@ -274,7 +296,7 @@ void DrawBandChart(Graphics& g, const RectF& rc, const BandChartInput& in, float
         size_t b = 0;
         for (size_t k = 0; k < in.seriesCount; ++k) {
             const ChartSeries& cs = in.series[k];
-            if (!cs.bars) { continue; }
+            if (!cs.bars || cs.tipOnly) { continue; }
             SolidBrush brush(cs.color);
             for (size_t i = 0; i < in.n; ++i) {
                 const double v = cs.v[i];
@@ -289,7 +311,7 @@ void DrawBandChart(Graphics& g, const RectF& rc, const BandChartInput& in, float
     // Lines, broken at gaps; an isolated point gets a dot.
     for (size_t k = 0; k < in.seriesCount; ++k) {
         const ChartSeries& cs = in.series[k];
-        if (cs.bars) { continue; }
+        if (cs.bars || cs.tipOnly) { continue; }
         Pen pen(cs.color, cs.width * s);
         pen.SetLineJoin(LineJoinRound);
         pen.SetStartCap(LineCapRound);
@@ -323,7 +345,7 @@ void DrawBandChart(Graphics& g, const RectF& rc, const BandChartInput& in, float
         const ChartSeries& cs = in.series[k];
         if (!cs.inTip) { continue; }
         const double v = cs.v[hi_];
-        if (!cs.bars && !std::isnan(v)) {
+        if (!cs.bars && !cs.tipOnly && !std::isnan(v)) {
             SolidBrush fill(cs.color);
             Pen ring(th.bg, 2.0f * s);
             const float r = 4.0f * s;
@@ -331,12 +353,12 @@ void DrawBandChart(Graphics& g, const RectF& rc, const BandChartInput& in, float
             g.DrawEllipse(&ring, X(hi_) - r, Y(v) - r, 2 * r, 2 * r);
         }
         rows[nr].swatch = cs.color;
-        rows[nr].hasSwatch = true;
+        rows[nr].hasSwatch = !cs.tipOnly;
         rows[nr].label = cs.label;
-        rows[nr].value = FmtNumber(v, in.decimals, in.unit);
+        rows[nr].value = FmtNumber(v, cs.decimals >= 0 ? cs.decimals : in.decimals, cs.unit != nullptr ? cs.unit : in.unit);
         ++nr;
     }
-    DrawTip(g, rc, X(hi_), plot.Y + 4.0f * s, SlotLabel(in.axis, in.firstYear, hi_), rows.data(), nr, th, s);
+    DrawTip(g, rc, X(hi_), plot.Y + 4.0f * s, SlotLabel(in, hi_), rows.data(), nr, th, s);
 }
 
 void DrawHeatmap(Graphics& g, const RectF& rc, const HeatmapInput& in, float s) {

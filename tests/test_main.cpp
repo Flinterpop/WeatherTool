@@ -5,6 +5,7 @@
 
 #include "climate.h"
 #include "config.h"
+#include "forecast.h"
 #include "http.h"
 #include "jsonscan.h"
 #include "units.h"
@@ -220,6 +221,118 @@ void TestUnits() {
     CHECK(FmtTemp(-0.04, Units::Metric) == L"0.0 °C");         // no "-0.0"
 }
 
+// A forecast reply laid out as Open-Meteo sends it, *_units sections first
+// (they repeat every key, so a lookup that strays out of its section would
+// read a unit string instead of a number). Hourly from 2026-11-21T16:00 at
+// UTC-5: temperature = hour index, snowfall 0.1 cm in hour 3 only. Daily
+// from 2026-11-21: max = 10 + day, min = day - 10, snow 2 cm on day 1.
+std::string MakeForecast(size_t hours, size_t days, bool shortHourly) {
+    std::string ht, htemp, hfeel, hprob, hpre, hsnow, hcode;
+    for (size_t i = 0; i < hours; ++i) {
+        char b[48];
+        const size_t h = 16 + i;
+        std::snprintf(b, sizeof(b), "\"2026-11-%02zuT%02zu:00\"", 21 + h / 24, h % 24);
+        const char* sep = i == 0 ? "" : ",";
+        ht += sep; ht += b;
+        std::snprintf(b, sizeof(b), "%zu", i);
+        htemp += sep; htemp += b;
+        hfeel += sep; hfeel += b;
+        hprob += sep; hprob += "40";
+        hpre += sep; hpre += (i == 3) ? "0.1" : "0.0";
+        hsnow += sep; hsnow += (i == 3) ? "0.1" : "0.0";
+        if (!(shortHourly && i + 1 == hours)) { hcode += sep; hcode += (i == 3) ? "71" : "3"; }
+    }
+    std::string dt, dmax, dmin, dpre, dsnow, dprob, dcode;
+    for (size_t i = 0; i < days; ++i) {
+        char b[32];
+        const char* sep = i == 0 ? "" : ",";
+        std::snprintf(b, sizeof(b), "\"%s\"", i < 10 ? ("2026-11-" + std::to_string(21 + i)).c_str()
+                                                       : ("2026-12-0" + std::to_string(i - 9)).c_str());
+        dt += sep; dt += b;
+        dmax += sep; dmax += std::to_string(10 + i);
+        dmin += sep; dmin += std::to_string(static_cast<int>(i) - 10);
+        dpre += sep; dpre += (i == 1) ? "2.0" : "0.0";
+        dsnow += sep; dsnow += (i == 1) ? "2.0" : "0.0";
+        dprob += sep; dprob += "10";
+        dcode += sep; dcode += (i == 1) ? "73" : "0";
+    }
+    return std::string("{\"latitude\":45.406376,\"longitude\":-75.71817,\"utc_offset_seconds\":-18000,") +
+           "\"timezone\":\"America/Toronto\",\"timezone_abbreviation\":\"EST\",\"elevation\":74.0," +
+           "\"current_units\":{\"time\":\"iso8601\",\"temperature_2m\":\"\xC2\xB0" "C\",\"snow_depth\":\"m\"}," +
+           "\"current\":{\"time\":\"2026-11-21T16:15\",\"interval\":900,\"temperature_2m\":-3.4,\"apparent_temperature\":-8.1," +
+           "\"relative_humidity_2m\":90,\"precipitation\":0.20,\"snowfall\":0.14,\"snow_depth\":0.12,\"weather_code\":71," +
+           "\"wind_speed_10m\":20.5,\"wind_direction_10m\":225,\"wind_gusts_10m\":41.0,\"is_day\":0}," +
+           "\"hourly_units\":{\"time\":\"iso8601\",\"temperature_2m\":\"\xC2\xB0" "C\"}," +
+           "\"hourly\":{\"time\":[" + ht + "],\"temperature_2m\":[" + htemp + "],\"apparent_temperature\":[" + hfeel +
+           "],\"precipitation_probability\":[" + hprob + "],\"precipitation\":[" + hpre + "],\"snowfall\":[" + hsnow +
+           "],\"weather_code\":[" + hcode + "]}," +
+           "\"daily_units\":{\"time\":\"iso8601\",\"temperature_2m_max\":\"\xC2\xB0" "C\"}," +
+           "\"daily\":{\"time\":[" + dt + "],\"weather_code\":[" + dcode + "],\"temperature_2m_max\":[" + dmax +
+           "],\"temperature_2m_min\":[" + dmin + "],\"precipitation_sum\":[" + dpre + "],\"snowfall_sum\":[" + dsnow +
+           "],\"precipitation_probability_max\":[" + dprob + "]}}";
+}
+
+void TestForecast() {
+    Forecast f;
+    std::wstring err;
+    CHECK(ParseForecast(MakeForecast(48, 16, false), f, err) && f.valid);
+    CHECK(f.timezone == L"America/Toronto" && f.tzAbbrev == L"EST" && f.utcOffset == -18000);
+    CHECK(Near(f.temp, -3.4) && Near(f.feels, -8.1) && Near(f.humidity, 90.0));
+    CHECK(Near(f.snowDepth, 12.0) && Near(f.snowfall, 0.14) && f.code == 71 && !f.isDay);
+    CHECK(Near(f.wind, 20.5) && Near(f.windDir, 225.0) && Near(f.gust, 41.0));
+    CHECK(f.nowTime.year == 2026 && f.nowTime.month == 11 && f.nowTime.day == 21 && f.nowTime.hour == 16 && f.nowTime.minute == 15);
+    CHECK(f.hours == 48 && f.days == 16);
+    CHECK(Near(f.hTemp[47], 47.0) && f.hCode[3] == 71 && f.hCode[4] == 3 && Near(f.hSnow[3], 0.1));
+    CHECK(f.hTime[8].day == 22 && f.hTime[8].hour == 0);   // 16:00 + 8 h crosses midnight
+    CHECK(Near(f.dMax[15], 25.0) && Near(f.dMin[0], -10.0) && Near(f.dSnow[1], 2.0) && f.dCode[1] == 73);
+    CHECK(f.dTime[10].month == 12 && f.dTime[10].day == 1);
+
+    // More values than the fixed arrays hold: only the first 48 / 16 are kept.
+    CHECK(ParseForecast(MakeForecast(60, 16, false), f, err) && f.hours == 48);
+    // A series shorter than its time axis is malformed, not silently padded.
+    CHECK(!ParseForecast(MakeForecast(48, 16, true), f, err) && !f.valid);
+    CHECK(!ParseForecast(R"({"error":true,"reason":"Latitude must be in range of -90 to 90°."})", f, err));
+    CHECK(err.find(L"Latitude") == 0);
+    CHECK(!ParseForecast("{\"latitude\":1}", f, err));
+
+    // Which slots are still ahead: at 16:30 local (21:30 UTC) the 16:00 hour is
+    // under way, at 17:00 it is over; the next morning the first day is over.
+    CHECK(ParseForecast(MakeForecast(48, 16, false), f, err));
+    const int64_t t1630 = LocalSeconds({ 2026, 11, 21, 16, 30 }) + 18000;
+    CHECK(FirstHourFrom(f, t1630) == 0);
+    CHECK(FirstHourFrom(f, t1630 + 1800) == 1);
+    CHECK(FirstDayFrom(f, t1630) == 0);
+    CHECK(FirstDayFrom(f, LocalSeconds({ 2026, 11, 22, 8, 0 }) + 18000) == 1);
+    CHECK(FirstHourFrom(f, t1630 + 3 * 86400) == 48);   // all over: an out-of-date forecast
+
+    // Daily normals: exact at mid-month, halfway between at the boundary, and
+    // wrapping from December into January.
+    std::array<double, 12> monthly{};
+    for (size_t m = 0; m < 12; ++m) { monthly[m] = static_cast<double>(m) * 10.0; }   // Jan 0 .. Dec 110
+    CHECK(Near(DayNormal(monthly, 6, 15), 50.0, 0.2));                // mid-June
+    CHECK(Near(DayNormal(monthly, 6, 30), 54.8, 0.2) && Near(DayNormal(monthly, 7, 1), 55.2, 0.2));
+    CHECK(Near(DayNormal(monthly, 1, 1), 110.0 * 0.5 + 0.0 * 0.5, 2.0));   // 1 Jan: between Dec (110) and Jan (0)
+    CHECK(Near(DayNormal(monthly, 12, 31), 55.0, 2.0));
+    monthly[3] = kNaN;
+    CHECK(std::isnan(DayNormal(monthly, 4, 1)) && Near(DayNormal(monthly, 2, 15), 10.0, 0.4));
+
+    CHECK(LocalSeconds({ 1970, 1, 1, 0, 0 }) == 0);
+    CHECK(LocalSeconds({ 2000, 3, 1, 0, 0 }) == 951868800);
+    CHECK(Weekday(2026, 11, 21) == 6 && Weekday(2000, 1, 1) == 6 && Weekday(2024, 2, 29) == 4);
+    CHECK(std::wstring(WeatherText(73)) == L"Snow" && std::wstring(WeatherText(42)).empty());
+    CHECK(std::wstring(WeatherGlyph(0, true)) == L"☀" && std::wstring(WeatherGlyph(0, false)) == L"☾");
+    CHECK(std::wstring(WeatherGlyph(85, true)) == L"❄" && std::wstring(WeatherGlyph(63, true)) == L"☂");
+    CHECK(ForecastUrl(45.41117, -75.69812).find(L"latitude=45.4112&longitude=-75.6981") != std::wstring::npos);
+    CHECK(ForecastUrl(0, 0).find(L"forecast_days=16&forecast_hours=48") != std::wstring::npos);
+
+    // Forecast units.
+    CHECK(FmtWind(16.09344, Units::Imperial) == L"10 mph" && FmtWind(20.6, Units::Metric) == L"21 km/h");
+    CHECK(FmtRain(25.4, Units::Imperial) == L"1.00 in" && FmtRain(2.44, Units::Metric) == L"2.4 mm");
+    CHECK(FmtSnowAmount(0.44, Units::Metric) == L"0.4 cm");
+    CHECK(std::wstring(CompassPoint(225)) == L"SW" && std::wstring(CompassPoint(359)) == L"N" &&
+          std::wstring(CompassPoint(-90)) == L"W" && std::wstring(CompassPoint(kNaN)).empty());
+}
+
 void TestConfig() {
     Location loc;
     CHECK(ParseLocation(L"Ottawa, Ontario, CA|45.41117|-75.69812", loc));
@@ -243,13 +356,14 @@ void TestConfig() {
     cfg.units = Units::Imperial;
     cfg.theme = ThemeMode::Dark;
     cfg.state.view = 2;
+    cfg.state.tab = 1;
     cfg.state.selected = 1;
     CHECK(SaveLocations(cfg, err) && SaveSettings(cfg, err) && SaveState(cfg, err));
     Config back;
     CHECK(LoadConfig(dir, back, err));
     CHECK(back.locCount == 2 && back.locs[0].name == L"Montréal, Quebec, CA");
     CHECK(back.units == Units::Imperial && back.theme == ThemeMode::Dark);
-    CHECK(back.state.view == 2 && back.state.selected == 1);
+    CHECK(back.state.view == 2 && back.state.selected == 1 && back.state.tab == 1);
     CHECK(!back.serverEnabled && back.serverPort == 8765);   // defaults
     back.serverEnabled = true;
     back.serverPort = 9001;
@@ -257,6 +371,7 @@ void TestConfig() {
     Config srv;
     CHECK(LoadConfig(dir, srv, err) && srv.serverEnabled && srv.serverPort == 9001);
     CHECK(CacheFileFor(back, back.locs[1]) == dir + L"\\cache\\45.4112_-75.6981.csv");
+    CHECK(ForecastFileFor(back, back.locs[1]) == dir + L"\\cache\\45.4112_-75.6981.forecast.json");
 
     std::string bytes;
     CHECK(WriteFileBytes(dir + L"\\x.bin", "abc", err) && ReadFileBytes(dir + L"\\x.bin", bytes, 16, err) && bytes == "abc");
@@ -361,11 +476,35 @@ int LiveCheck(const char* startDate) {
     return 0;
 }
 
+// Optional: one real forecast request (`--live-forecast`).
+int LiveForecast() {
+    HttpClient http;
+    auto buf = std::make_unique<char[]>(kHttpBufSize);
+    HttpResult hr;
+    std::wstring err;
+    if (!http.Get(ForecastUrl(45.41117, -75.69812), buf.get(), kHttpBufSize, hr, err)) {
+        std::printf("live: transport failed after %u ms: %ls\n", hr.elapsedMs, err.c_str());
+        return 1;
+    }
+    std::printf("live: HTTP %u, %zu bytes in %u ms\n", hr.status, hr.length, hr.elapsedMs);
+    Forecast f;
+    if (!ParseForecast(std::string_view(buf.get(), hr.length), f, err)) {
+        std::printf("live: parse failed: %ls\n", err.c_str());
+        return 1;
+    }
+    std::printf("live: now %04d-%02d-%02d %02d:%02d %ls, %.1f C (feels %.1f), %ls, wind %.0f km/h; %zu hours, %zu days, "
+                "today %.1f / %.1f C\n", f.nowTime.year, f.nowTime.month, f.nowTime.day, f.nowTime.hour, f.nowTime.minute,
+                f.tzAbbrev.c_str(), f.temp, f.feels, WeatherText(f.code), f.wind, f.hours, f.days, f.dMax[0], f.dMin[0]);
+    return f.hours == kForecastHours && f.days == kForecastDays ? 0 : 1;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     if (argc > 1 && std::string(argv[1]) == "--live") { return LiveCheck(argc > 2 ? argv[2] : nullptr); }
+    if (argc > 1 && std::string(argv[1]) == "--live-forecast") { return LiveForecast(); }
     TestJsonScan();
+    TestForecast();
     TestParseArchive();
     TestMergeAndCache();
     TestSeries();

@@ -134,6 +134,12 @@ std::wstring CacheFileFor(const Config& cfg, const Location& loc) {
     return cfg.cacheDir + b.data();
 }
 
+std::wstring ForecastFileFor(const Config& cfg, const Location& loc) {
+    std::array<wchar_t, 64> b{};
+    swprintf_s(b.data(), b.size(), L"\\%.4f_%.4f.forecast.json", loc.lat, loc.lon);
+    return cfg.cacheDir + b.data();
+}
+
 bool LoadConfig(const std::wstring& dir, Config& cfg, std::wstring& err) {
     assert(!dir.empty());
     cfg = Config{};
@@ -160,6 +166,7 @@ bool LoadConfig(const std::wstring& dir, Config& cfg, std::wstring& err) {
 
     ViewState& s = cfg.state;
     s.selected = static_cast<size_t>(Clamp(ReadInt(cfg, L"state", L"selected", 0), 0, kMaxLocations - 1));
+    s.tab      = Clamp(ReadInt(cfg, L"state", L"tab", 0), 0, kTabCount - 1);
     s.view     = Clamp(ReadInt(cfg, L"state", L"view", 0), 0, kViewCount - 1);
     s.month    = Clamp(ReadInt(cfg, L"state", L"month", 0), 0, 11);
     s.measure  = Clamp(ReadInt(cfg, L"state", L"measure", 0), 0, 2);
@@ -206,6 +213,7 @@ bool SaveLocations(const Config& cfg, std::wstring& err) {
 bool SaveState(const Config& cfg, std::wstring& err) {
     const ViewState& s = cfg.state;
     bool ok = WriteStr(cfg, L"state", L"selected", std::to_wstring(s.selected), err) &&
+              WriteStr(cfg, L"state", L"tab", std::to_wstring(s.tab), err) &&
               WriteStr(cfg, L"state", L"view", std::to_wstring(s.view), err) &&
               WriteStr(cfg, L"state", L"month", std::to_wstring(s.month), err) &&
               WriteStr(cfg, L"state", L"measure", std::to_wstring(s.measure), err) &&

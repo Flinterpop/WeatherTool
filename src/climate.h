@@ -52,6 +52,11 @@ YearSeries MonthSeries(const Climate& c, Var var, int month);
 // Mean of each calendar month over the years [y0, y1].
 std::array<double, 12> MonthNormals(const Climate& c, Var var, int y0, int y1);
 
+// A day's normal from the 12 monthly normals, interpolated linearly between
+// mid-month values so it changes smoothly across a month boundary instead of
+// in a step. `month` is 1..12. NaN when either neighbouring month is NaN.
+double DayNormal(const std::array<double, 12>& monthly, int month, int day);
+
 // Mean of the values for years [y0, y1]; NaN when there are none.
 double PeriodMean(const YearSeries& s, int y0, int y1);
 

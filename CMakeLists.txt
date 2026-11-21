@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 # Single source of truth for the version: it flows into the code
 # (WEATHERTOOL_VERSION*) and the exe's VERSIONINFO resource from here.
-project(WeatherTool VERSION 0.3.0 LANGUAGES CXX RC)
+project(WeatherTool VERSION 0.4.0 LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -27,6 +27,7 @@ set(WT_OPTIONS /W4 /WX /permissive- /utf-8 /EHsc /Zc:__cplusplus)
 add_library(weathertool_core STATIC
     src/climate.cpp
     src/config.cpp
+    src/forecast.cpp
     src/http.cpp
     src/jsonscan.cpp
     src/theme.cpp
