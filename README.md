@@ -1,6 +1,10 @@
 # WeatherTool
 
 [![Release](https://img.shields.io/github/v/release/Flinterpop/WeatherTool)](https://github.com/Flinterpop/WeatherTool/releases/latest)
+[![Release date](https://img.shields.io/github/release-date/Flinterpop/WeatherTool)](https://github.com/Flinterpop/WeatherTool/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/Flinterpop/WeatherTool/total)](https://github.com/Flinterpop/WeatherTool/releases)
+![Platform](https://img.shields.io/badge/platform-Windows%2010%2B%20x64-0078d4)
+![C++20](https://img.shields.io/badge/C%2B%2B-20-00599c)
 
 *Last updated: 21 Nov 2026*
 
@@ -8,7 +12,12 @@ A Win32 C++ desktop app that shows **historical temperature and snowfall** for t
 
 ## Installing
 
-Download `WeatherTool-<version>-win64.zip` from the latest release, unzip it anywhere and run `WeatherTool.exe`. It is a portable copy: settings and downloaded data stay in the folder beside the exe. Windows 10 or later, 64-bit; nothing else to install.
+Each [release](https://github.com/Flinterpop/WeatherTool/releases/latest) ships two ways. Both need Windows 10 or later, 64-bit, and nothing else.
+
+- **`WeatherTool-<version>-setup.exe`** installs into Program Files for everyone on the PC (it asks for administrator rights), with a Start menu entry, an optional desktop shortcut and an uninstaller in Apps & Features. Settings and downloaded data are kept in `%ProgramData%\WeatherTool`, which Setup makes writable for every user. Uninstalling deletes the downloaded data but keeps `WeatherTool.ini`, so a reinstall still has your places. `/VERYSILENT` installs without questions.
+- **`WeatherTool-<version>-portable.zip`** holds `WeatherTool.exe` and this README: unzip it anywhere and run it. Everything it keeps is in files beside the exe, so moving the folder moves them.
+
+Each release's notes list the SHA-256 of every file.
 
 ## Views
 
@@ -58,6 +67,30 @@ build\Release\weathertool_tests.exe --live   # one real download through the app
 
 The build uses `/W4 /WX /permissive-` and the static CRT, so the exe needs no VC++ redistributable. The UI-free parts (JSON scanning, climate parsing and statistics, cache format, config, units, themes) are a static library, `weathertool_core`, shared by the app and the tests. `--live` is not part of ctest because it needs the network and spends rate-limit allowance.
 
+## Releasing
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\release.ps1
+```
+
+The script configures, builds and runs the tests. It then checks the exe: it must not need the VC++ runtime, its version resource must match `project(VERSION)` in `CMakeLists.txt`, and it must carry no build-machine paths (the repo is public). Then it writes the following to `dist\`:
+
+- `WeatherTool-<version>-portable.zip`, checked to hold exactly the exe and the README with `/` entry names;
+- `WeatherTool-<version>-setup.exe`, built from `installer\WeatherTool.iss` by Inno Setup 6 (`ISCC.exe`, looked for in `C:\bin\InnoSetup6` and then Program Files);
+- `WeatherTool-<version>-sha256.md`, for the release notes.
+
+The version lives only in `project(VERSION)`; the README badge reads the latest GitHub release.
+
+`tools\check_installer.ps1 -Setup dist\WeatherTool-<version>-setup.exe`, run from an elevated PowerShell, installs the setup silently and checks the following:
+
+- the installed exe is the built one;
+- `%ProgramData%\WeatherTool` is writable by Users, and the program folder is not;
+- the shortcut exists;
+- the installed copy keeps its settings in ProgramData;
+- an uninstall removes the app and the cache but keeps the INI.
+
+It refuses to run over an existing install or data folder, and cleans up after itself.
+
 ## Layout of the code
 
 | File | Role |
@@ -73,6 +106,10 @@ The build uses `/W4 /WX /permissive-` and the static CRT, so the exe needs no VC
 | `src/config.*` | Data folder resolution and `WeatherTool.ini`. |
 | `src/units.*` | Metric and imperial conversion and number formatting. |
 | `src/theme.*` | Light and dark palettes and the heatmap colour ramps. |
+| `src/WeatherTool.rc`, `src/resource.h`, `src/WeatherTool.ico` | Version resource, app icon and the Add place dialog. |
+| `tools/make_icon.py` | Regenerates the multi-size `.ico` with Pillow: `python tools/make_icon.py`. |
+| `installer/WeatherTool.iss` | Inno Setup script: machine-level install, `%ProgramData%\WeatherTool` with Users modify. |
+| `tools/release.ps1`, `tools/check_installer.ps1` | Build-test-package, and the elevated end-to-end installer check. |
 | `tests/test_main.cpp` | Unit tests, plus the `--live` check. |
 
 **Why gzip only:** offered deflate, Open-Meteo sends it, and WinHTTP aborts the read with "Operation aborted". This was confirmed both ways on 21 Nov 2026 with the same small request: it fails with deflate allowed and succeeds with gzip only.

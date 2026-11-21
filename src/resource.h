@@ -1,6 +1,7 @@
 // Resource identifiers shared by WeatherTool.rc and the code.
 #pragma once
 
+#define IDI_APPICON    1      // lowest icon id: what Explorer shows for the exe
 #define IDD_ADDPLACE   101
 
 #define IDC_QUERY      1001

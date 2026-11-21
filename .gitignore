@@ -10,10 +10,17 @@
 !/src/*.cpp
 !/src/*.h
 !/src/*.rc
+!/src/*.ico
+!/tools/
+!/tools/*.py
+!/tools/*.ps1
+!/installer/
+!/installer/*.iss
 !/tests/
 !/tests/*.cpp
 
 # ---- Generated (last match wins) -------------------------------------------
 build/
+dist/
 out/
 .vs/

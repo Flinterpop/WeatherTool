@@ -1,5 +1,6 @@
 #include "app.h"
 
+#include "resource.h"
 #include "units.h"
 
 #include <commctrl.h>
@@ -201,7 +202,13 @@ bool App::Create(HINSTANCE hInst, int nCmdShow, std::wstring& err) {
     wc.lpfnWndProc   = WndProc;
     wc.hInstance     = hInst;
     wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hIcon         = LoadIconW(nullptr, IDI_APPLICATION);
+    // Large icon (Alt+Tab, taskbar) and small one (title bar), each picked
+    // from the .ico at the size the system asks for.
+    wc.hIcon   = static_cast<HICON>(LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON,
+                                               GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR));
+    wc.hIconSm = static_cast<HICON>(LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON,
+                                               GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
+    assert(wc.hIcon != nullptr && wc.hIconSm != nullptr);
     wc.lpszClassName = kClassName;
     if (RegisterClassExW(&wc) == 0) {
         err = L"RegisterClassEx failed";
