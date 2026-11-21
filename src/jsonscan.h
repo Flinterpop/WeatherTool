@@ -19,8 +19,9 @@ size_t FindKey(std::string_view j, std::string_view key, size_t from, size_t to)
 bool ReadNumber(std::string_view j, size_t& pos, double& out);
 
 // Reads a string at `pos` (leading whitespace skipped), decoding escapes
-// and UTF-8 into `out`; advances `pos` past the closing quote.
-bool ReadString(std::string_view j, size_t& pos, std::wstring& out);
+// and UTF-8 into `out`; advances `pos` past the closing quote. False for a
+// string longer than `maxBytes` (UTF-8, after unescaping).
+bool ReadString(std::string_view j, size_t& pos, std::wstring& out, size_t maxBytes = 4096);
 
 // Reads `true` / `false` at `pos`.
 bool ReadBool(std::string_view j, size_t& pos, bool& out);

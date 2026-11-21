@@ -9,6 +9,7 @@
 #include "http.h"
 #include "jsonscan.h"
 #include "units.h"
+#include "update.h"
 #include "webserver.h"
 
 #include <cstring>
@@ -333,6 +334,67 @@ void TestForecast() {
           std::wstring(CompassPoint(-90)) == L"W" && std::wstring(CompassPoint(kNaN)).empty());
 }
 
+// A latest-release reply laid out as GitHub's API sends it: top-level fields,
+// then assets, each with a nested uploader object.
+std::string MakeRelease(const char* tag, bool draft, bool withZip, bool withSetup, const char* host) {
+    const std::string base = std::string(host) + "/Flinterpop/WeatherTool/releases/download/" + tag + "/";
+    const std::string v = std::string(tag).substr(1);
+    std::string assets;
+    auto asset = [&](const std::string& name) {
+        if (!assets.empty()) { assets += ","; }
+        assets += "{\"url\":\"https://api.github.com/x\",\"id\":1,\"name\":\"" + name +
+                  "\",\"label\":null,\"uploader\":{\"login\":\"someone\",\"id\":2,\"type\":\"User\"},"
+                  "\"content_type\":\"application/octet-stream\",\"size\":2400000,"
+                  "\"browser_download_url\":\"" + base + name + "\"}";
+    };
+    asset("WeatherTool-" + v + "-sha256.md");
+    if (withZip) { asset("WeatherTool-" + v + "-portable.zip"); }
+    if (withSetup) { asset("WeatherTool-" + v + "-setup.exe"); }
+    return std::string("{\"url\":\"https://api.github.com/repos/Flinterpop/WeatherTool/releases/1\",\"tag_name\":\"") + tag +
+           "\",\"name\":\"WeatherTool " + v + "\",\"draft\":" + (draft ? "true" : "false") +
+           ",\"prerelease\":false,\"author\":{\"login\":\"someone\"},\"assets\":[" + assets +
+           "],\"body\":\"A **Now** tab.\\r\\n\\r\\n| File | \\\"tag_name\\\": no |\\nMontr\\u00e9al\"}";
+}
+
+void TestUpdate() {
+    using namespace wt::update;
+    Version v;
+    CHECK(ParseVersion(L"v0.4.0", v) && v.major == 0 && v.minor == 4 && v.patch == 0);
+    CHECK(ParseVersion(L"12.3.45", v) && VersionText(v) == L"12.3.45");
+    CHECK(!ParseVersion(L"v0.4", v) && !ParseVersion(L"v0.4.0-rc1", v) && !ParseVersion(L"", v) && !ParseVersion(L"v.1.2", v));
+    CHECK(Newer({ 0, 5, 0 }, { 0, 4, 9 }) && Newer({ 1, 0, 0 }, { 0, 9, 9 }) && Newer({ 0, 4, 1 }, { 0, 4, 0 }));
+    CHECK(!Newer({ 0, 4, 0 }, { 0, 4, 0 }) && !Newer({ 0, 3, 9 }, { 0, 4, 0 }));
+
+    const std::wstring gh = kDownloadBase;
+    Release r;
+    std::wstring err;
+    CHECK(ParseLatest(MakeRelease("v0.5.0", false, true, true, "https://github.com"), gh, r, err));
+    CHECK(r.tag == L"v0.5.0" && r.version.minor == 5);
+    CHECK(r.zipUrl == gh + L"v0.5.0/WeatherTool-0.5.0-portable.zip");
+    CHECK(r.setupUrl == gh + L"v0.5.0/WeatherTool-0.5.0-setup.exe");
+    CHECK(r.notes.find(L"A **Now** tab.") == 0 && r.notes.find(L"Montréal") != std::wstring::npos);
+    CHECK(AssetFor(r, true, err) == r.setupUrl && AssetFor(r, false, err) == r.zipUrl);
+
+    // Only the setup: an installed copy can update, a portable one is told why not.
+    CHECK(ParseLatest(MakeRelease("v0.5.0", false, false, true, "https://github.com"), gh, r, err));
+    CHECK(AssetFor(r, false, err).empty() && err.find(L"WeatherTool-0.5.0-portable.zip") != std::wstring::npos);
+    // Links that do not lead to this repository's releases are ignored, so nothing is left.
+    CHECK(!ParseLatest(MakeRelease("v0.5.0", false, true, true, "https://example.com"), gh, r, err));
+    CHECK(err.find(L"has neither") != std::wstring::npos);
+    // A test server's links pass when it is the base.
+    CHECK(ParseLatest(MakeRelease("v0.5.0", false, true, false, "http://127.0.0.1:18765"), L"http://127.0.0.1:18765/", r, err));
+    CHECK(!ParseLatest(MakeRelease("v0.5.0", true, true, true, "https://github.com"), gh, r, err));   // a draft
+    CHECK(!ParseLatest(MakeRelease("latest", false, true, true, "https://github.com"), gh, r, err));
+    CHECK(!ParseLatest(R"({"message":"API rate limit exceeded for 1.2.3.4.","documentation_url":"x"})", gh, r, err));
+    CHECK(err.find(L"API rate limit exceeded") != std::wstring::npos);
+
+    CHECK(ShortNotes(L"short", 100) == L"short");
+    const std::wstring longNotes = std::wstring(60, L'a') + L"\n" + std::wstring(60, L'b');
+    CHECK(ShortNotes(longNotes, 100) == std::wstring(60, L'a') + L"...");   // cut at the line
+    CHECK(ShortNotes(std::wstring(9, L'x') + L"\U0001F600" + L"yyyy", 10) == std::wstring(9, L'x') + L"...");   // not half a pair
+    CHECK(SetupArgs().find(L"/ALLUSERS") != std::wstring::npos && SetupArgs().find(L"/WEATHERTOOLRESTART=1") != std::wstring::npos);
+}
+
 void TestConfig() {
     Location loc;
     CHECK(ParseLocation(L"Ottawa, Ontario, CA|45.41117|-75.69812", loc));
@@ -505,6 +567,7 @@ int main(int argc, char** argv) {
     if (argc > 1 && std::string(argv[1]) == "--live-forecast") { return LiveForecast(); }
     TestJsonScan();
     TestForecast();
+    TestUpdate();
     TestParseArchive();
     TestMergeAndCache();
     TestSeries();

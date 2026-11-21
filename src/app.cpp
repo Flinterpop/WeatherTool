@@ -2,6 +2,7 @@
 
 #include "resource.h"
 #include "units.h"
+#include "updater.h"
 
 #include <commctrl.h>
 #include <commdlg.h>
@@ -35,7 +36,7 @@ enum : int {
     IDM_VIEW0 = 120,                                  // + View
     IDM_METRIC = 130, IDM_IMPERIAL,
     IDM_THEME_SYSTEM = 140, IDM_THEME_LIGHT, IDM_THEME_DARK,
-    IDM_ABOUT = 150,
+    IDM_ABOUT = 150, IDM_CHECKUPDATE,
     IDM_TAB0 = 160, IDM_TAB1, IDM_TABNEXT,             // + Tab
     IDC_LIST = 200, IDC_ADD, IDC_REMOVE, IDC_UPDATE, IDC_UNITS,
     IDC_VIEW0 = 210, IDC_RANGE0 = 220, IDC_MEASURE0 = 230, IDC_MONTH0 = 240, IDC_TAB0 = 250,
@@ -51,6 +52,20 @@ constexpr UINT_PTR kForecastTimer   = 2;
 constexpr UINT     kForecastEveryMs = 15u * 60u * 1000u;
 constexpr int64_t  kForecastStale   = 14 * 60;
 constexpr size_t   kMaxForecastBytes = 256u * 1024u;
+// An update leaves WeatherTool.exe.old and its staging folder; the old copy
+// may still be exiting at start, so they are removed again a little later.
+constexpr UINT_PTR kCleanUpTimer   = 3;
+constexpr UINT     kCleanUpAfterMs = 15000;
+constexpr UINT     WM_APP_UPDATE   = WM_APP + 4;   // + 1..3 are the fetcher's
+
+// What Check for updates' worker threads hand back to the window.
+struct UpdateResult {
+    bool            ok = false;
+    bool            staged = false;    // the download step (else the check)
+    std::wstring    error;
+    update::Release release;
+    std::wstring    newExe;            // staged: the new exe, or the setup to run
+};
 
 // Layout in device-independent pixels.
 constexpr int kMargin   = 10;
@@ -207,6 +222,7 @@ void SetCheck(HWND h, bool on) {
 } // namespace
 
 App::~App() {
+    StopUpdateThread();
     fetcher_.Stop();
     FreeBackBuffer();
     if (hUiFont_ != nullptr)    { DeleteObject(hUiFont_); }
@@ -290,6 +306,8 @@ bool App::Create(HINSTANCE hInst, int nCmdShow, std::wstring& err) {
     ScheduleForecasts(false);
     SetTimer(hwnd_, kUpdateTimer, kUpdateEveryMs, nullptr);
     SetTimer(hwnd_, kForecastTimer, kForecastEveryMs, nullptr);
+    updater::CleanUp(IsInstalledCopy());   // what an update left, if anything
+    SetTimer(hwnd_, kCleanUpTimer, kCleanUpAfterMs, nullptr);
     return true;
 }
 
@@ -334,7 +352,12 @@ LRESULT App::Handle(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_TIMER:
         if (wp == kUpdateTimer) { ScheduleUpdates(false); }
         if (wp == kForecastTimer) { ScheduleForecasts(false); }
+        if (wp == kCleanUpTimer) {
+            KillTimer(hwnd_, kCleanUpTimer);
+            if (!updateBusy_.load()) { updater::CleanUp(IsInstalledCopy()); }
+        }
         return 0;
+    case WM_APP_UPDATE: OnUpdateResult(lp); return 0;
     case WM_APP_ARCHIVE: OnArchiveReady(); return 0;
     case WM_APP_FORECAST: OnForecastReady(); return 0;
     case WM_GETMINMAXINFO: {
@@ -400,6 +423,8 @@ void App::OnCreate() {
     AppendMenuW(view, MF_STRING, IDM_THEME_LIGHT, L"Theme: &light");
     AppendMenuW(view, MF_STRING, IDM_THEME_DARK, L"Theme: &dark");
     HMENU help = CreatePopupMenu();
+    AppendMenuW(help, MF_STRING, IDM_CHECKUPDATE, L"Check for &updates...");
+    AppendMenuW(help, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(help, MF_STRING, IDM_ABOUT, L"&About WeatherTool");
     AppendMenuW(hMenu_, MF_POPUP, reinterpret_cast<UINT_PTR>(file), L"&File");
     AppendMenuW(hMenu_, MF_POPUP, reinterpret_cast<UINT_PTR>(place), L"&Place");
@@ -486,6 +511,108 @@ void App::OnToggleWebServer() {
     cfg_.serverEnabled = turnOn;
     std::wstring err;
     if (!SaveServer(cfg_, err)) { SetStatus(err); }
+}
+
+// ---------------------------------------------------------------------------
+// Help > Check for updates
+
+void App::StopUpdateThread() {
+    updateCancel_ = true;
+    if (updateThread_.joinable()) { updateThread_.join(); }
+    // A result posted just before the join and not yet taken would leak.
+    MSG m{};
+    for (int i = 0; i < 4 && PeekMessageW(&m, hwnd_, WM_APP_UPDATE, WM_APP_UPDATE, PM_REMOVE); ++i) {
+        delete reinterpret_cast<UpdateResult*>(m.lParam);
+    }
+}
+
+void App::CheckForUpdates() {
+    if (updateBusy_.load()) {
+        SetStatus(L"Already checking for updates.");
+        return;
+    }
+    if (updateThread_.joinable()) { updateThread_.join(); }   // the last one has finished
+    SetStatus(L"Checking for updates…");
+    updateBusy_ = true;
+    updateCancel_ = false;
+    HWND h = hwnd_;
+    updateThread_ = std::thread([this, h] {
+        auto r = std::make_unique<UpdateResult>();
+        r->ok = updater::CheckLatest(r->release, r->error);
+        UpdateResult* p = r.release();
+        if (!PostMessageW(h, WM_APP_UPDATE, 0, reinterpret_cast<LPARAM>(p))) { delete p; }   // window gone
+        updateBusy_ = false;
+    });
+}
+
+void App::OnUpdateResult(LPARAM lp) {
+    std::unique_ptr<UpdateResult> r(reinterpret_cast<UpdateResult*>(lp));
+    assert(r != nullptr);
+    if (!r->ok) {
+        SetStatus(r->staged ? L"Not updated." : L"Could not check for updates.");
+        MessageBoxW(hwnd_, r->error.c_str(), L"Check for updates", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    const std::wstring version = update::VersionText(r->release.version);
+    const bool installed = IsInstalledCopy();
+    if (r->staged && installed) {
+        updater::RequestSetup(r->newExe);   // wWinMain runs it once this window has closed
+        SetStatus(L"Installing WeatherTool " + version + L".");
+        OnClose();
+        return;
+    }
+    if (r->staged) {
+        std::wstring error;
+        if (!updater::Swap(r->newExe, error)) {
+            SetStatus(L"Not updated.");
+            MessageBoxW(hwnd_, error.c_str(), L"Check for updates", MB_OK | MB_ICONWARNING);
+            return;
+        }
+        updater::RequestRestart(true);   // wWinMain starts the new exe once this one has closed
+        SetStatus(L"WeatherTool " + version + L" is in place. Restarting.");
+        OnClose();
+        return;
+    }
+    update::Version current;
+    const bool known = update::ParseVersion(kVersion, current);
+    assert(known);
+    if (known && !update::Newer(r->release.version, current)) {
+        SetStatus(L"WeatherTool is up to date.");
+        const std::wstring t = std::wstring(L"WeatherTool ") + kVersion + L" is the latest version.";
+        MessageBoxW(hwnd_, t.c_str(), L"Check for updates", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    std::wstring missing;
+    if (update::AssetFor(r->release, installed, missing).empty()) {
+        SetStatus(L"Not updated.");
+        MessageBoxW(hwnd_, missing.c_str(), L"Check for updates", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    const std::wstring notes = update::ShortNotes(r->release.notes, 800);
+    const std::wstring ask = L"WeatherTool " + version + L" is available (this is " + kVersion + L").\n\n" +
+                             (notes.empty() ? std::wstring() : notes + L"\n\n") +
+                             (installed ? L"Download and install it now? WeatherTool closes, Windows asks to let Setup "
+                                          L"make changes, and WeatherTool starts again when it is done."
+                                        : L"Download it and restart WeatherTool now?");
+    if (MessageBoxW(hwnd_, ask.c_str(), L"Check for updates", MB_YESNO | MB_ICONQUESTION) != IDYES) {
+        SetStatus(L"Not updated.");
+        return;
+    }
+    SetStatus(L"Downloading WeatherTool " + version + L"…");
+    if (updateThread_.joinable()) { updateThread_.join(); }   // the check posted its result just before it ended
+    updateBusy_ = true;
+    updateCancel_ = false;
+    HWND h = hwnd_;
+    const update::Release release = r->release;
+    updateThread_ = std::thread([this, h, release, installed] {
+        auto s = std::make_unique<UpdateResult>();
+        s->staged = true;
+        s->release = release;
+        s->ok = updater::Stage(release, installed, updateCancel_, s->newExe, s->error);
+        UpdateResult* p = s.release();
+        if (!PostMessageW(h, WM_APP_UPDATE, 0, reinterpret_cast<LPARAM>(p))) { delete p; }   // window gone
+        updateBusy_ = false;
+    });
 }
 
 void App::CreateFonts() {
@@ -1043,6 +1170,7 @@ void App::OnCommand(int id, int code) {
         }
         break;
     case IDM_EXIT:     OnClose(); break;
+    case IDM_CHECKUPDATE: CheckForUpdates(); break;
     case IDM_ABOUT: {
         const std::wstring t = std::wstring(kAppName) + L" " + kVersion +
             L"\n\nHistorical temperature and snowfall for the places you choose, and their weather now.\n\n"
@@ -1071,6 +1199,7 @@ void App::OnClose() {
         MessageBoxW(hwnd_, (L"Could not save the window state:\n" + err).c_str(), kAppName, MB_OK | MB_ICONWARNING);
     }
     ShowWindow(hwnd_, SW_HIDE);   // a download in flight may take a moment to finish
+    StopUpdateThread();
     web_.Stop();
     fetcher_.Stop();
     DestroyWindow(hwnd_);

@@ -19,6 +19,15 @@ Each [release](https://github.com/Flinterpop/WeatherTool/releases/latest) ships 
 
 Each release's notes list the SHA-256 of every file.
 
+### Updates
+
+**Help > Check for updates** asks GitHub for the latest release and, if it is newer, shows its notes and offers to install it:
+
+- **A portable copy** downloads the new zip into an `Update` folder beside the exe, unpacks the new `WeatherTool.exe` (with Windows' own `tar`), puts it in place of the running one (kept as `WeatherTool.exe.old` until it has exited) and restarts. Both leftovers are removed on the next start.
+- **An installed copy** downloads the new setup into a folder under `%ProgramData%\WeatherTool` that only you, SYSTEM and Administrators can write, closes, and runs it: Windows asks to let Setup make changes, and WeatherTool starts again when it is done.
+
+It is only ever started by you, never in the background. The repository is public, so this needs no GitHub account: two plain HTTPS requests to GitHub (the release information, then the file), and only links into this repository's own releases are followed.
+
 ## History tab
 
 | View | Temperature (top) | Snowfall (bottom) |
@@ -111,6 +120,8 @@ The version lives only in `project(VERSION)`; the README badge reads the latest 
 
 It refuses to run over an existing install or data folder, and cleans up after itself.
 
+`tools\drive_update.ps1 -Exe build\Release\WeatherTool.exe` drives Help > Check for updates in a copy of the exe against a local web server standing in for GitHub (`WEATHERTOOL_UPDATE_URL`; needs Python for `http.server`), so nothing reaches GitHub. It checks four cases at the app and in the server's log: up to date, the server unreachable, a release zip with no exe in it (refused, exe unchanged), and a newer release (downloaded, swapped in, restarted, leftovers removed).
+
 ## Layout of the code
 
 | File | Role |
@@ -126,6 +137,8 @@ It refuses to run over an existing install or data folder, and cleans up after i
 | `src/dialogs.*` | The Add place dialog (search runs on the worker thread). |
 | `src/webserver.*` | File > Web server: a small Winsock HTTP server (IPv6 and IPv4, one connection at a time) that serves the compiled-in page and icon, and the LAN addresses to show. |
 | `web/index.html` | The browser version: one self-contained page (plain JavaScript and SVG), compiled into the exe as a resource. |
+| `src/update.*` | Help > Check for updates, UI-free: version numbers, GitHub's latest-release reply, which asset this copy needs. |
+| `src/updater.*` | The Windows half: download, unpack, swap the exe or run the setup after closing, clean up. |
 | `src/config.*` | Data folder resolution and `WeatherTool.ini`. |
 | `src/units.*` | Metric and imperial conversion and number formatting. |
 | `src/theme.*` | Light and dark palettes and the heatmap colour ramps. |
@@ -133,6 +146,7 @@ It refuses to run over an existing install or data folder, and cleans up after i
 | `tools/make_icon.py` | Regenerates the multi-size `.ico` with Pillow: `python tools/make_icon.py`. |
 | `installer/WeatherTool.iss` | Inno Setup script: machine-level install, `%ProgramData%\WeatherTool` with Users modify. |
 | `tools/release.ps1`, `tools/check_installer.ps1` | Build-test-package, and the elevated end-to-end installer check. |
+| `tools/drive_update.ps1` | End-to-end check of Help > Check for updates against a local stand-in for GitHub. |
 | `tests/test_main.cpp` | Unit tests, plus the `--live` check. |
 
 **Why gzip only:** offered deflate, Open-Meteo sends it, and WinHTTP aborts the read with "Operation aborted". This was confirmed both ways on 21 Nov 2026 with the same small request: it fails with deflate allowed and succeeds with gzip only.

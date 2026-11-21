@@ -1,5 +1,6 @@
 // WeatherTool entry point.
 #include "app.h"
+#include "updater.h"
 
 #include <commctrl.h>
 
@@ -11,6 +12,7 @@ name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
 processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE /*hPrev*/, PWSTR /*cmdLine*/, int nCmdShow) {
+    (void)wt::updater::ExePath();   // learned now, before an update can rename the running file
     const BOOL dpiOk = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     (void)dpiOk;  // best effort: falls back to system DPI on older builds
 
@@ -41,5 +43,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE /*hPrev*/, PWSTR /*cmdLine*/, int
     }
 
     Gdiplus::GdiplusShutdown(gdiToken);
+    // Help > Check for updates put a new exe in this one's place (start it) or
+    // downloaded a new setup (run it). Settings were saved on close, so the new
+    // copy picks up where this one left off.
+    if (!wt::updater::AfterExit()) {
+        MessageBoxW(nullptr, L"WeatherTool could not start its update. Start WeatherTool again, or install the new "
+                             L"release by hand.", L"WeatherTool", MB_OK | MB_ICONINFORMATION);
+    }
     return rc;
 }

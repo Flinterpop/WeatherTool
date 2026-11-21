@@ -8,10 +8,13 @@
 #include "config.h"
 #include "dialogs.h"
 #include "fetcher.h"
+#include "update.h"
 #include "webserver.h"
 #include "theme.h"
 
+#include <atomic>
 #include <memory>
+#include <thread>
 
 namespace wt {
 
@@ -43,6 +46,12 @@ private:
     void OnDrawItem(const DRAWITEMSTRUCT* dis);
     void OnArchiveReady();
     void OnForecastReady();
+    void OnUpdateResult(LPARAM lp);
+
+    // Help > Check for updates (update.h, updater.h): a check on a worker
+    // thread, then, if the user agrees, a download on another.
+    void CheckForUpdates();
+    void StopUpdateThread();
 
     // commands
     void OnRemovePlace();
@@ -138,6 +147,9 @@ private:
     std::unique_ptr<std::array<Forecast, kMaxLocations>>     forecasts_;
     std::array<std::wstring, kMaxLocations>                  fcErrors_{};
     std::wstring status_;
+    std::thread       updateThread_;
+    std::atomic<bool> updateBusy_{ false };
+    std::atomic<bool> updateCancel_{ false };
     float scale_  = 1.0f;
     int   hoverX_ = -1;
     int   hoverY_ = -1;

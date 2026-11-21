@@ -74,6 +74,14 @@ int Clamp(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
 } // namespace
 
+bool IsInstalledCopy() {
+    const std::wstring exe = ExeDir();
+    return StartsWithI(exe, KnownFolder(FOLDERID_ProgramFiles)) || StartsWithI(exe, KnownFolder(FOLDERID_ProgramFilesX86));
+}
+
+std::wstring ExeFolder() { return ExeDir(); }
+std::wstring ProgramDataFolder() { return KnownFolder(FOLDERID_ProgramData); }
+
 bool ResolveDataDir(std::wstring& dir, std::wstring& note, std::wstring& err) {
     note.clear();
     std::array<wchar_t, MAX_PATH> env{};
@@ -83,9 +91,7 @@ bool ResolveDataDir(std::wstring& dir, std::wstring& note, std::wstring& err) {
         note = L"data folder from WEATHERTOOL_DIR";
     } else {
         const std::wstring exe = ExeDir();
-        const bool installed = StartsWithI(exe, KnownFolder(FOLDERID_ProgramFiles)) ||
-                               StartsWithI(exe, KnownFolder(FOLDERID_ProgramFilesX86));
-        if (installed) {
+        if (IsInstalledCopy()) {
             const std::wstring pd = KnownFolder(FOLDERID_ProgramData);
             dir = pd.empty() ? exe : pd + L"\\WeatherTool";
         } else {

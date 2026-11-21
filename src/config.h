@@ -47,6 +47,12 @@ struct Config {
     ViewState    state;
 };
 
+// True when the exe is under Program Files: an installed copy, which cannot
+// write beside itself and updates by running the new setup.
+bool IsInstalledCopy();
+std::wstring ExeFolder();
+std::wstring ProgramDataFolder();   // %ProgramData%, "" if unknown
+
 // Picks the data folder as described above and creates it (and cache\).
 // `note` explains a fallback, for the status line.
 bool ResolveDataDir(std::wstring& dir, std::wstring& note, std::wstring& err);

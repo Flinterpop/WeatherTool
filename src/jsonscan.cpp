@@ -119,13 +119,13 @@ bool ReadBool(std::string_view j, size_t& pos, bool& out) {
     return false;
 }
 
-bool ReadString(std::string_view j, size_t& pos, std::wstring& out) {
+bool ReadString(std::string_view j, size_t& pos, std::wstring& out, size_t maxBytes) {
+    assert(maxBytes > 0 && maxBytes <= 1024u * 1024u);
     SkipSpace(j, pos);
     if (pos >= j.size() || j[pos] != '"') { return false; }
     std::string bytes;
     size_t p = pos + 1;
-    constexpr size_t kMaxLen = 4096;
-    while (p < j.size() && bytes.size() < kMaxLen) {
+    while (p < j.size() && bytes.size() < maxBytes) {
         const char c = j[p];
         if (c == '"') {
             out = Widen(bytes);

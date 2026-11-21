@@ -11,6 +11,11 @@
 ; Uninstall leaves WeatherTool.ini (the places and settings, for a reinstall) and deletes
 ; cache\, which the app downloads again.
 ;
+; Help > Check for updates in an installed copy downloads the next release's setup and runs it
+; with /SILENT /SUPPRESSMSGBOXES /NORESTART /ALLUSERS /WEATHERTOOLRESTART=1 once WeatherTool has
+; closed (update::SetupArgs); the second [Run] entry starts WeatherTool again only then, never
+; after an ordinary silent install (an admin deploying it).
+;
 ; The setup carries exactly what the portable zip does: WeatherTool.exe and README.md.
 
 #ifndef AppVersion
@@ -82,5 +87,14 @@ Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\WeatherTool.exe"; Tasks: desktopicon
 
 [Run]
+; An interactive install offers to start it; WeatherTool updating itself starts it again.
 ; runasoriginaluser: start it as the person who ran Setup, not the elevated account.
 Filename: "{app}\WeatherTool.exe"; Description: "Start {#AppName}"; Flags: nowait postinstall skipifsilent runasoriginaluser
+Filename: "{app}\WeatherTool.exe"; Flags: nowait runasoriginaluser; Check: SelfUpdate
+
+[Code]
+// Setup was run by WeatherTool's own Check for updates (update::SetupArgs passes this).
+function SelfUpdate: Boolean;
+begin
+  Result := ExpandConstant('{param:WEATHERTOOLRESTART|0}') = '1';
+end;
