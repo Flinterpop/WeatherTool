@@ -2,8 +2,8 @@
 // decodes map and radar tiles, and a bounded in-memory cache of decoded
 // bitmaps the UI thread draws from. Only tiles the map asked for in its last
 // two paints are fetched (no prefetching, as OpenStreetMap's tile policy
-// requires); map tiles are kept on disk for 7 days, radar tiles for 3 hours;
-// radar requests stay under RainViewer's 100 a minute.
+// requires); map tiles are kept on disk for 7 days, radar and alert tiles for
+// 3 hours; radar requests stay under RainViewer's 100 a minute.
 #pragma once
 
 #include "gdiplus_inc.h"
@@ -45,7 +45,7 @@ public:
     Gdiplus::Bitmap* Peek(const std::wstring& key);   // cached only, never queues
     void TakeDone();                                    // on WM_APP_TILES
 
-    void RequestFrames();                               // the radar frame list
+    void RequestFrames(radar::Source source);           // the radar frame list
     bool TakeFrames(radar::Frames& out, std::wstring& err);
 
     size_t Queued() const;
@@ -88,6 +88,7 @@ private:
     std::deque<Done>        done_;
     bool                    posted_ = false;
     bool                    framesWanted_ = false;
+    radar::Source           framesSource_ = radar::Source::World;
     bool                    framesReady_ = false;
     radar::Frames           frames_;
     std::wstring            framesErr_;

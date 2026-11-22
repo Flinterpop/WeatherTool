@@ -29,7 +29,9 @@ constexpr wchar_t kClassName[] = L"WeatherToolMain";
 constexpr wchar_t kAppName[]   = L"WeatherTool";
 constexpr wchar_t kCredit[]    = L"Data: Open-Meteo.com, ERA5 reanalysis (CC BY 4.0)";
 constexpr wchar_t kCreditNow[] = L"Data: Open-Meteo.com forecast, national weather models (CC BY 4.0)";
-constexpr wchar_t kCreditMap[] = L"Map © OpenStreetMap contributors · Weather data by RainViewer";
+constexpr wchar_t kCreditOsm[] = L"Map © OpenStreetMap contributors";
+constexpr wchar_t kCreditRv[]  = L"Weather data by RainViewer";
+constexpr wchar_t kCreditMsc[] = L"Data Source: Environment and Climate Change Canada";
 
 // Menu and control identifiers.
 enum : int {
@@ -43,7 +45,7 @@ enum : int {
     IDM_DAYCLEAR = 170,                                // Esc: back to the next 48 hours
     IDC_LIST = 200, IDC_ADD, IDC_REMOVE, IDC_UPDATE, IDC_UNITS,
     IDC_VIEW0 = 210, IDC_RANGE0 = 220, IDC_MEASURE0 = 230, IDC_MONTH0 = 240, IDC_TAB0 = 250,
-    IDC_RADAR = 260, IDC_PREV, IDC_PLAY, IDC_NEXT, IDC_ZOOMOUT, IDC_ZOOMIN,
+    IDC_RADAR = 260, IDC_PREV, IDC_PLAY, IDC_NEXT, IDC_ZOOMOUT, IDC_ZOOMIN, IDC_WORLD, IDC_NAMERICA, IDC_ALERTS,
 };
 
 constexpr UINT_PTR kUpdateTimer   = 1;
@@ -61,8 +63,9 @@ constexpr size_t   kMaxForecastBytes = 256u * 1024u;
 constexpr UINT_PTR kCleanUpTimer   = 3;
 constexpr UINT     kCleanUpAfterMs = 15000;
 constexpr UINT     WM_APP_UPDATE   = WM_APP + 4;   // + 1..3 are the fetcher's, + 5..6 the map's
-// Map tab: RainViewer adds a radar frame every 10 minutes; the animation
-// steps a frame at a time and holds on the latest.
+// Map tab: RainViewer adds a radar frame every 10 minutes, GeoMet every 6;
+// the animation steps a frame at a time and holds on the latest. Alert tiles
+// are asked for again every 10 minutes.
 constexpr UINT_PTR kFramesTimer    = 4;
 constexpr UINT     kFramesEveryMs  = 5u * 60u * 1000u;
 constexpr int64_t  kFramesStale    = 9 * 60;
@@ -72,6 +75,7 @@ constexpr int      kAnimHoldTicks  = 3;
 constexpr UINT_PTR kAgoTimer       = 6;
 constexpr UINT     kAgoEveryMs     = 30u * 1000u;
 constexpr int      kMapBtnW        = 62;
+constexpr int64_t  kAlertsEvery    = 600;
 
 // What Check for updates' worker threads hand back to the window.
 struct UpdateResult {
@@ -384,7 +388,7 @@ LRESULT App::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == kForecastTimer) { ScheduleForecasts(false); }
         if (wp == kFramesTimer && MapTab() && tilesOk_) {
             framesAsked_ = UnixNow();
-            tiles_.RequestFrames();
+            tiles_.RequestFrames(RadarSource());
         }
         if (wp == kAnimTimer) { StepFrame(+1); }
         if (wp == kAgoTimer && MapTab()) { InvalidateRect(hwnd_, &agoRect_, FALSE); }   // "N minutes ago" moves on
@@ -702,6 +706,9 @@ void App::CreateControls() {
     hNext_    = button(L"▶", IDC_NEXT, false);
     hZoomOut_ = button(L"−", IDC_ZOOMOUT, false);
     hZoomIn_  = button(L"+", IDC_ZOOMIN, false);
+    hWorld_   = button(L"World", IDC_WORLD, true);
+    hNAmerica_ = button(L"N. America", IDC_NAMERICA, true);
+    hAlerts_  = button(L"Alerts", IDC_ALERTS, true);
 }
 
 void App::Layout() {
@@ -743,11 +750,18 @@ void App::Layout() {
         MoveWindow(hb, mx, row1, bw2, bh, TRUE);
         mx += bw2 + gap;
     }
-    ShowWindow(hZoomOut_, mapShow);
-    ShowWindow(hZoomIn_, mapShow);
-    MoveWindow(hZoomIn_, r0 - Px(36), row1, Px(36), bh, TRUE);
-    MoveWindow(hZoomOut_, r0 - Px(72) - gap, row1, Px(36), bh, TRUE);
-    agoRect_ = map ? RECT{ mx + Px(8), row1, r0 - Px(72) - gap - Px(8), row1 + bh } : RECT{ 0, 0, 0, 0 };
+    // At the right, leftwards: zoom in, zoom out, then Alerts and the radar source pair.
+    struct Right { HWND h; int w; int after; };   // `after`: extra space to its left
+    const Right mapRight[] = { { hZoomIn_, 36, 0 }, { hZoomOut_, 36, 12 }, { hAlerts_, kMapBtnW, 12 },
+                               { hNAmerica_, 84, 0 }, { hWorld_, kMapBtnW, 0 } };
+    int rx = r0;
+    for (const Right& b : mapRight) {
+        ShowWindow(b.h, mapShow);
+        rx -= Px(b.w);
+        MoveWindow(b.h, rx, row1, Px(b.w), bh, TRUE);
+        rx -= gap + Px(b.after);
+    }
+    agoRect_ = map ? RECT{ mx + Px(8), row1, rx - Px(8), row1 + bh } : RECT{ 0, 0, 0, 0 };
 
     // History, row 1: views (+ months in Month view). The Now tab has none
     // of these, so its header moves up into their place.
@@ -809,6 +823,11 @@ void App::SyncControls() {
     for (size_t m = 0; m < 12; ++m) { SetCheck(hMonths_[m], static_cast<int>(m) == s.month); }
     SetCheck(hUnits_, cfg_.units == Units::Imperial);
     SetCheck(hRadar_, s.radar);
+    SetCheck(hWorld_, s.radarSrc == static_cast<int>(radar::Source::World));
+    SetCheck(hNAmerica_, s.radarSrc == static_cast<int>(radar::Source::NorthAmerica));
+    EnableWindow(hWorld_, s.radar);
+    EnableWindow(hNAmerica_, s.radar);
+    SetCheck(hAlerts_, s.alerts);
     SetCheck(hPlay_, playing_);
     const bool frames = s.radar && frames_.count > 1;
     EnableWindow(hPrev_, frames);
@@ -854,7 +873,7 @@ void App::ApplyTheme() {
     for (HWND h : hRanges_) { SetWindowTheme(h, sub, nullptr); }
     for (HWND h : hMeasures_) { SetWindowTheme(h, sub, nullptr); }
     for (HWND h : hMonths_) { SetWindowTheme(h, sub, nullptr); }
-    HWND mapButtons[] = { hRadar_, hPrev_, hPlay_, hNext_, hZoomOut_, hZoomIn_ };
+    HWND mapButtons[] = { hRadar_, hPrev_, hPlay_, hNext_, hZoomOut_, hZoomIn_, hWorld_, hNAmerica_, hAlerts_ };
     for (HWND h : mapButtons) { SetWindowTheme(h, sub, nullptr); }
     RedrawWindow(hwnd_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
 }
@@ -1146,7 +1165,7 @@ void App::SetTab(int tab) {
         if (!cfg_.state.hasMap && cfg_.state.selected < cfg_.locCount) { CenterMapOn(cfg_.state.selected); }
         if (tilesOk_ && UnixNow() - framesAsked_ > kFramesStale) {
             framesAsked_ = UnixNow();
-            tiles_.RequestFrames();
+            tiles_.RequestFrames(RadarSource());
         }
     }
     SyncControls();
@@ -1199,6 +1218,29 @@ void App::OnCommand(int id, int code) {
     case IDC_RADAR:
         cfg_.state.radar = !cfg_.state.radar;
         if (!cfg_.state.radar) { SetPlaying(false); }
+        SyncControls();
+        InvalidateMap();
+        return;
+    case IDC_WORLD:
+    case IDC_NAMERICA: {
+        const int src = static_cast<int>(id == IDC_WORLD ? radar::Source::World : radar::Source::NorthAmerica);
+        if (src != cfg_.state.radarSrc) {   // the other source's frames are no use: start again
+            cfg_.state.radarSrc = src;
+            SetPlaying(false);
+            frames_ = radar::Frames{};
+            frame_ = 0;
+            framesError_.clear();
+            if (tilesOk_) {
+                framesAsked_ = UnixNow();
+                tiles_.RequestFrames(RadarSource());
+            }
+        }
+        SyncControls();
+        InvalidateMap();
+        return;
+    }
+    case IDC_ALERTS:
+        cfg_.state.alerts = !cfg_.state.alerts;
         SyncControls();
         InvalidateMap();
         return;
@@ -1294,8 +1336,10 @@ void App::OnCommand(int id, int code) {
             L"\n\nHistorical temperature and snowfall for the places you choose, and their weather now.\n\n"
             L"Weather data by Open-Meteo.com, licensed CC BY 4.0. History: ERA5 and ERA5-Land reanalysis from the "
             L"Copernicus Climate Change Service. Now: Open-Meteo's forecast from national weather services' models. "
-            L"Map: © OpenStreetMap contributors (openstreetmap.org/copyright); radar: weather data by RainViewer "
-            L"(rainviewer.com). "
+            L"Map: © OpenStreetMap contributors (openstreetmap.org/copyright); world radar: weather data by RainViewer "
+            L"(rainviewer.com); North American radar and weather alerts: Data Source: Environment and Climate Change "
+            L"Canada, under the Environment and Climate Change Canada Data Services End-use Licence "
+            L"(eccc-msc.github.io/open-data/licence). "
             L"Values describe a model grid cell, not a weather station; snowfall in particular can differ from a "
             L"local gauge.\n\nData folder:\n" + cfg_.dir +
             L"\n\nWeb server: " + (web_.Running() ? WebUrls() : std::wstring(L"off (File > Web server)"));
@@ -1428,7 +1472,7 @@ void App::OnDpiChanged(WPARAM wp, LPARAM lp) {
     for (HWND h : hRanges_) { setFont(h); }
     for (HWND h : hMeasures_) { setFont(h); }
     for (HWND h : hMonths_) { setFont(h); }
-    HWND mapButtons[] = { hRadar_, hPrev_, hPlay_, hNext_, hZoomOut_, hZoomIn_ };
+    HWND mapButtons[] = { hRadar_, hPrev_, hPlay_, hNext_, hZoomOut_, hZoomIn_, hWorld_, hNAmerica_, hAlerts_ };
     for (HWND h : mapButtons) { setFont(h); }
     SendMessageW(hList_, LB_SETITEMHEIGHT, 0, Px(kItemH));
     const RECT* r = reinterpret_cast<const RECT*>(lp);
@@ -2169,6 +2213,8 @@ void App::OnFramesReady() {
             framesError_ = err;
             SetStatus(L"Radar: " + err);
         }
+    } else if (f.source != RadarSource()) {
+        return;   // asked for before the source was changed
     } else {
         const bool atLatest = frames_.count == 0 || frame_ + 1 >= frames_.count;
         frames_ = f;
@@ -2284,41 +2330,86 @@ void App::PaintMap(Graphics& g) {
         }
     }
 
-    // Radar: one 512 px RainViewer tile at zoom zr covers 2^(z-zr) map tiles each way.
-    if (cfg_.state.radar && frames_.count > 0) {
-        const int zr = std::min(z - 1, radar::kMaxZoom);
-        const double RT = T * static_cast<double>(1 << (z - zr));
-        const int nr = 1 << zr;
-        ImageAttributes see;
-        ColorMatrix am = { { { 1, 0, 0, 0, 0 }, { 0, 1, 0, 0, 0 }, { 0, 0, 1, 0, 0 }, { 0, 0, 0, 0.8f, 0 }, { 0, 0, 0, 0, 1 } } };
-        see.SetColorMatrix(&am);
-        const int rx0 = static_cast<int>(std::floor((r.X - ox) / RT));
-        const int rx1 = static_cast<int>(std::floor((r.X + r.Width - ox) / RT));
-        const int ry0 = std::max(0, static_cast<int>(std::floor((r.Y - oy) / RT)));
-        const int ry1 = std::min(nr - 1, static_cast<int>(std::floor((r.Y + r.Height - oy) / RT)));
-        const size_t next = (frame_ + 1) % frames_.count;
-        const size_t prev = (frame_ + frames_.count - 1) % frames_.count;
-        auto key = [&](size_t f, int x, int y) {
-            return L"radar_" + std::to_wstring(frames_.frame[f].time) + L"_" + std::to_wstring(zr) + L"_" +
-                   std::to_wstring(x) + L"_" + std::to_wstring(y);
-        };
-        for (int ty = ry0; ty <= ry1 && ty - ry0 < 16; ++ty) {
-            for (int tx = rx0; tx <= rx1 && tx - rx0 < 16; ++tx) {
-                const int wx = slippy::WrapTile(tx, zr);
-                Bitmap* b = tiles_.Get(key(frame_, wx, ty), radar::TileUrl(frames_, frame_, zr, wx, ty), true);
-                if (b == nullptr) { b = tiles_.Peek(key(prev, wx, ty)); }   // still loading: the frame before
-                if (playing_) { (void)tiles_.Get(key(next, wx, ty), radar::TileUrl(frames_, next, zr, wx, ty), true); }
-                if (b == nullptr) { continue; }
-                const RectF dest(static_cast<REAL>(ox + tx * RT), static_cast<REAL>(oy + ty * RT),
-                                 static_cast<REAL>(RT), static_cast<REAL>(RT));
-                g.DrawImage(b, dest, 0, 0, static_cast<REAL>(b->GetWidth()), static_cast<REAL>(b->GetHeight()), UnitPixel, &see);
-            }
-        }
-    }
+    if (cfg_.state.alerts) { PaintAlerts(g, r, ox, oy); }
+    if (cfg_.state.radar && frames_.count > 0) { PaintRadar(g, r, ox, oy); }
     PaintMarkers(g, r, ox, oy);
     g.ResetClip();
     g.SetPixelOffsetMode(PixelOffsetModeDefault);
     PaintMapOverlays(g, r);
+}
+
+// The 512 px overlay tiles (zoom zr) over the map rectangle: calls `each` with
+// the wrapped tile x, y and where it goes on screen. At most 16 x 16.
+template <typename Each>
+static void ForOverlayTiles(const RectF& r, double ox, double oy, double T, int z, int zr, Each each) {
+    assert(zr >= 0 && zr <= z);
+    const double RT = T * static_cast<double>(1 << (z - zr));
+    const int nr = 1 << zr;
+    const int rx0 = static_cast<int>(std::floor((r.X - ox) / RT));
+    const int rx1 = static_cast<int>(std::floor((r.X + r.Width - ox) / RT));
+    const int ry0 = std::max(0, static_cast<int>(std::floor((r.Y - oy) / RT)));
+    const int ry1 = std::min(nr - 1, static_cast<int>(std::floor((r.Y + r.Height - oy) / RT)));
+    for (int ty = ry0; ty <= ry1 && ty - ry0 < 16; ++ty) {
+        for (int tx = rx0; tx <= rx1 && tx - rx0 < 16; ++tx) {
+            const RectF dest(static_cast<REAL>(ox + tx * RT), static_cast<REAL>(oy + ty * RT), static_cast<REAL>(RT),
+                             static_cast<REAL>(RT));
+            each(slippy::WrapTile(tx, zr), ty, dest);
+        }
+    }
+}
+
+// Radar: one 512 px tile at zoom zr covers 2^(z-zr) map tiles each way.
+void App::PaintRadar(Graphics& g, const RectF& r, double ox, double oy) {
+    assert(frames_.count > 0 && frame_ < frames_.count);
+    const int z = cfg_.state.mapZoom;
+    const bool msc = frames_.source == radar::Source::NorthAmerica;
+    const int zr = std::max(0, std::min(z - 1, radar::MaxZoom(frames_.source)));
+    ImageAttributes see;
+    ColorMatrix am = { { { 1, 0, 0, 0, 0 }, { 0, 1, 0, 0, 0 }, { 0, 0, 1, 0, 0 }, { 0, 0, 0, 0.8f, 0 }, { 0, 0, 0, 0, 1 } } };
+    see.SetColorMatrix(&am);
+    const size_t next = (frame_ + 1) % frames_.count;
+    const size_t prev = (frame_ + frames_.count - 1) % frames_.count;
+    auto key = [&](size_t f, int x, int y) {
+        return L"radar_" + std::to_wstring(frames_.frame[f].time) + (msc ? L"_na" : L"_") + std::to_wstring(zr) + L"_" +
+               std::to_wstring(x) + L"_" + std::to_wstring(y);
+    };
+    auto url = [&](size_t f, int x, int y) {
+        return msc ? radar::MscTileUrl(radar::MscLayer::Radar, frames_.frame[f].time, zr, x, y)
+                   : radar::TileUrl(frames_, f, zr, x, y);
+    };
+    const double T = slippy::kTile * static_cast<double>(scale_);
+    ForOverlayTiles(r, ox, oy, T, z, zr, [&](int x, int y, const RectF& dest) {
+        if (msc && !radar::MscCovers(radar::MscLayer::Radar, zr, x, y)) { return; }   // nothing there to ask for
+        Bitmap* b = tiles_.Get(key(frame_, x, y), url(frame_, x, y), true);
+        if (b == nullptr) { b = tiles_.Peek(key(prev, x, y)); }   // still loading: the frame before
+        if (playing_) { (void)tiles_.Get(key(next, x, y), url(next, x, y), true); }
+        if (b != nullptr) {
+            g.DrawImage(b, dest, 0, 0, static_cast<REAL>(b->GetWidth()), static_cast<REAL>(b->GetHeight()), UnitPixel, &see);
+        }
+    });
+}
+
+// MSC's weather alerts in effect, half transparent so the map shows through.
+// The layer has no time: the tiles are asked for again every kAlertsEvery.
+void App::PaintAlerts(Graphics& g, const RectF& r, double ox, double oy) {
+    const int z = cfg_.state.mapZoom;
+    const int zr = std::max(0, std::min(z - 1, radar::kMscMaxZoom));
+    const int64_t slot = UnixNow() / kAlertsEvery * kAlertsEvery;
+    ImageAttributes see;
+    ColorMatrix am = { { { 1, 0, 0, 0, 0 }, { 0, 1, 0, 0, 0 }, { 0, 0, 1, 0, 0 }, { 0, 0, 0, 0.45f, 0 }, { 0, 0, 0, 0, 1 } } };
+    see.SetColorMatrix(&am);
+    auto key = [&](int64_t t, int x, int y) {
+        return L"alerts_" + std::to_wstring(t) + L"_" + std::to_wstring(zr) + L"_" + std::to_wstring(x) + L"_" + std::to_wstring(y);
+    };
+    const double T = slippy::kTile * static_cast<double>(scale_);
+    ForOverlayTiles(r, ox, oy, T, z, zr, [&](int x, int y, const RectF& dest) {
+        if (!radar::MscCovers(radar::MscLayer::Alerts, zr, x, y)) { return; }
+        Bitmap* b = tiles_.Get(key(slot, x, y), radar::MscTileUrl(radar::MscLayer::Alerts, 0, zr, x, y), true);
+        if (b == nullptr) { b = tiles_.Peek(key(slot - kAlertsEvery, x, y)); }   // the last ones until the new ones come
+        if (b != nullptr) {
+            g.DrawImage(b, dest, 0, 0, static_cast<REAL>(b->GetWidth()), static_cast<REAL>(b->GetHeight()), UnitPixel, &see);
+        }
+    });
 }
 
 // Each place as a dot with its name and, when its forecast is here, its temperature now.
@@ -2389,22 +2480,31 @@ void App::PaintMapOverlays(Graphics& g, const RectF& r) {
         t = b.data();
         t += frame_ + 1 == frames_.count ? L" (latest)"
                                          : L"  (" + std::to_wstring(frame_ + 1) + L" of " + std::to_wstring(frames_.count) + L")";
-        if (cfg_.state.mapZoom - 1 > radar::kMaxZoom) { t += L" · coarser than the map at this zoom"; }
+        if (frames_.source == radar::Source::NorthAmerica) { t += L" · North America only"; }
+        if (cfg_.state.mapZoom - 1 > radar::MaxZoom(frames_.source)) { t += L" · coarser than the map at this zoom"; }
     }
-    box(t, fb, r.X + 8.0f * s, r.Y + 8.0f * s, false);
+    const RectF top = box(t, fb, r.X + 8.0f * s, r.Y + 8.0f * s, false);
 
-    // Bottom right: the credits (OpenStreetMap and RainViewer both require them on the map).
-    const std::wstring credit = L"© OpenStreetMap contributors" + std::wstring(cfg_.state.radar ? L" · Weather data by RainViewer" : L"");
-    box(credit, f, r.X + r.Width - 4.0f * s, r.Y + r.Height - 22.0f * s, true);
+    // Bottom right: the credits (OpenStreetMap, RainViewer and ECCC all require them on the map).
+    const RectF cb = box(MapCredit(), f, r.X + r.Width - 4.0f * s, r.Y + r.Height - 22.0f * s, true);
+    // The radar key sits bottom left, above the credits when they reach that far.
+    RectF kr = r;
+    if (cb.X < r.X + 400.0f * s) { kr.Height = cb.Y - r.Y + 4.0f * s; }
 
-    // Bottom left: what the radar colours mean (RainViewer's "Universal Blue" scheme).
+    if (cfg_.state.alerts) { PaintAlertsKey(g, top.Y + top.Height + 6.0f * s, r); }
+    // Bottom left: what the radar colours mean.
     if (!cfg_.state.radar) { return; }
+    if (RadarSource() == radar::Source::NorthAmerica) {
+        PaintPrecipTypeKey(g, kr);
+        return;
+    }
+    // RainViewer's "Universal Blue" scheme.
     static const ARGB kRain[] = { 0xFF36BAE5, 0xFF0077AA, 0xFF004768, 0xFFFFC500, 0xFFFF4400, 0xFFC10000, 0xFFFF77FF };
     static const ARGB kSnow[] = { 0xFFC4FFFF, 0xFF7FBFFF, 0xFF2F6FFF, 0xFF0022FF };
     const REAL sw = 16.0f * s, sh = 10.0f * s;
     const REAL lw = 46.0f * s + TextW(g, L"light", f) + sw * 7.0f + TextW(g, L"very heavy", f) + 14.0f * s;
     const REAL lh = 44.0f * s;
-    const RectF lb(r.X + 8.0f * s, r.Y + r.Height - lh - 8.0f * s, lw, lh);
+    const RectF lb(kr.X + 8.0f * s, kr.Y + kr.Height - lh - 8.0f * s, lw, lh);
     g.FillRectangle(&back, lb);
     g.DrawRectangle(&edge, lb);
     auto ramp = [&](const ARGB* c, size_t n, REAL y, const wchar_t* name, const wchar_t* lo, const wchar_t* hi) {
@@ -2424,10 +2524,85 @@ void App::PaintMapOverlays(Graphics& g, const RectF& r) {
     ramp(kSnow, sizeof(kSnow) / sizeof(kSnow[0]), lb.Y + 26.0f * s, L"Snow", L"light", L"heavy");
 }
 
+// The credits for what the map is showing now.
+std::wstring App::MapCredit() const {
+    std::wstring t = kCreditOsm;
+    if (cfg_.state.radar && RadarSource() == radar::Source::World) { t += L" · " + std::wstring(kCreditRv); }
+    if ((cfg_.state.radar && RadarSource() == radar::Source::NorthAmerica) || cfg_.state.alerts) {
+        t += L" · " + std::wstring(kCreditMsc);
+    }
+    return t;
+}
+
+// A row of key swatches with a name in front; returns the x after it.
+static REAL KeyRow(Graphics& g, const Font& f, const Color& ink, REAL x, REAL y, REAL s, const wchar_t* name, REAL nameW,
+                   const ARGB* c, size_t n) {
+    PaintText(g, name, f, ink, x, y - 3.0f * s);
+    x += nameW;
+    for (size_t k = 0; k < n; ++k) {
+        SolidBrush b{ Color(c[k]) };
+        g.FillRectangle(&b, x, y, 16.0f * s, 10.0f * s);
+        x += 16.0f * s;
+    }
+    return x;
+}
+
+// GeoMet's surface precipitation type (style SfcPrecipType_Dis), light to heavy.
+void App::PaintPrecipTypeKey(Graphics& g, const RectF& r) {
+    const float s = scale_;
+    const Font f = UiFont(8.5f, s);
+    static const ARGB kRain[]  = { 0xFF9AFD9A, 0xFF00CB00, 0xFF008000 };
+    static const ARGB kSnow[]  = { 0xFF7FDFEB, 0xFF47A4F0, 0xFF0000E0 };
+    static const ARGB kMixed[] = { 0xFFE0BDE6, 0xFFC36DD2, 0xFF9B27AF };
+    static const ARGB kFrz[]   = { 0xFFFECBC8, 0xFFFE1E0D };
+    static const ARGB kHail[]  = { 0xFFFEC007 };
+    const REAL c1 = TextW(g, L"Mixed", f) + 8.0f * s;
+    const REAL c2 = TextW(g, L"Freezing rain", f) + 8.0f * s;
+    const REAL w = 6.0f * s + c1 + 48.0f * s + 18.0f * s + c2 + 32.0f * s + 8.0f * s;
+    const REAL h = 62.0f * s;
+    const RectF b(r.X + 8.0f * s, r.Y + r.Height - h - 8.0f * s, w, h);
+    SolidBrush back(theme_->tipBg);
+    Pen edge(theme_->tipBorder, 1.0f);
+    g.FillRectangle(&back, b);
+    g.DrawRectangle(&edge, b);
+    const Color& ink = theme_->tipText;
+    const REAL x1 = b.X + 6.0f * s;
+    const REAL x2 = x1 + c1 + 48.0f * s + 18.0f * s;
+    (void)KeyRow(g, f, ink, x1, b.Y + 8.0f * s, s, L"Rain", c1, kRain, 3);
+    (void)KeyRow(g, f, ink, x1, b.Y + 26.0f * s, s, L"Snow", c1, kSnow, 3);
+    (void)KeyRow(g, f, ink, x1, b.Y + 44.0f * s, s, L"Mixed", c1, kMixed, 3);
+    (void)KeyRow(g, f, ink, x2, b.Y + 8.0f * s, s, L"Freezing rain", c2, kFrz, 2);
+    (void)KeyRow(g, f, ink, x2, b.Y + 26.0f * s, s, L"Hail", c2, kHail, 1);
+    PaintText(g, L"light → heavy", f, theme_->textMuted, x2, b.Y + 41.0f * s);
+}
+
+// What the alert colours mean, under the radar time box.
+void App::PaintAlertsKey(Graphics& g, REAL y, const RectF& r) {
+    const float s = scale_;
+    const Font f = UiFont(8.5f, s);
+    static const ARGB kLevels[] = { 0xFFFFFF00, 0xFFFFA500, 0xFFFF0000 };
+    static const ARGB kStatement[] = { 0xFFD3D3D3 };
+    const wchar_t* name = L"Alerts";
+    const REAL nw = TextW(g, name, f) + 8.0f * s;
+    const REAL tw = TextW(g, L"yellow, orange, red", f) + TextW(g, L"statement", f);
+    const RectF b(r.X + 8.0f * s, y, 6.0f * s + nw + 48.0f * s + tw + 40.0f * s, 20.0f * s);
+    SolidBrush back(theme_->tipBg);
+    Pen edge(theme_->tipBorder, 1.0f);
+    g.FillRectangle(&back, b);
+    g.DrawRectangle(&edge, b);
+    const Color& ink = theme_->tipText;
+    REAL x = KeyRow(g, f, ink, b.X + 6.0f * s, b.Y + 5.0f * s, s, name, nw, kLevels, 3);
+    PaintText(g, L"yellow, orange, red", f, ink, x + 4.0f * s, b.Y + 2.0f * s);
+    x += TextW(g, L"yellow, orange, red", f) + 14.0f * s;
+    x = KeyRow(g, f, ink, x, b.Y + 5.0f * s, s, L"", 0.0f, kStatement, 1);
+    PaintText(g, L"statement", f, ink, x + 4.0f * s, b.Y + 2.0f * s);
+}
+
 void App::PaintStatus(Graphics& g) {
     const RectF r = ToRectF(statusRect_);
     const Font f = UiFont(8.5f, scale_);
-    const wchar_t* credit = MapTab() ? kCreditMap : NowTab() ? kCreditNow : kCredit;
+    const std::wstring mapCredit = MapTab() ? MapCredit() : std::wstring();
+    const wchar_t* credit = MapTab() ? mapCredit.c_str() : NowTab() ? kCreditNow : kCredit;
     const float cw = TextW(g, credit, f);
     PaintText(g, credit, f, theme_->textMuted, r.X + r.Width - cw, r.Y + 2.0f * scale_);
     DrawTextClip(g, status_, f, theme_->textSecondary, RectF(r.X, r.Y + 2.0f * scale_, r.Width - cw - 16.0f * scale_, r.Height));

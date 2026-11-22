@@ -79,6 +79,7 @@ th { color: var(--text-secondary); font-weight: 600; }
 #mapBox { position: relative; height: 72vh; min-height: 360px; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; margin-top: 10px; background: var(--surface-1); touch-action: none; cursor: grab; user-select: none; }
 #mapBox img { position: absolute; display: block; pointer-events: none; -webkit-user-drag: none; }
 #mapBox img.radar { opacity: .8; }
+#mapBox img.alerts { opacity: .45; }
 @media (prefers-color-scheme: dark) { #mapBox img.base { filter: brightness(.6); } }
 .mapnote { position: absolute; background: var(--surface-1); border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; font-size: 12px; color: var(--text-primary); z-index: 3; }
 .mapnote a { color: inherit; }
@@ -130,10 +131,12 @@ footer a { color: inherit; }
       <button id="mPrev" title="Earlier picture">◀</button><button id="mPlay">Play</button><button id="mNext" title="Later picture">▶</button>
       <span id="mAgo" style="color:var(--text-secondary);margin-left:6px"></span>
       <span style="margin-left:auto"></span>
+      <span class="seg"><button id="mWorld" title="Radar from RainViewer, worldwide">World</button><button id="mNA" title="Radar from Environment and Climate Change Canada: rain, snow, mixed and freezing rain, Canada and the US">N. America</button></span>
+      <button id="mAlerts" title="Weather alerts in effect, from Environment and Climate Change Canada">Alerts</button>
       <button id="mOut" title="Zoom out">−</button><button id="mIn" title="Zoom in">+</button>
     </div>
     <div id="mapBox"></div>
-    <footer>Drag to move, scroll or pinch to zoom. Radar: the past 2 hours in 10-minute pictures, from RainViewer (free for personal use, regional detail only).</footer>
+    <footer>Drag to move, scroll or pinch to zoom. World radar: the past 2 hours in 10-minute pictures, from RainViewer (free for personal use, regional detail only). N. America radar and Alerts: the past 3 hours in 12-minute pictures and the alerts in effect, Data Source: Environment and Climate Change Canada (<a href="https://eccc-msc.github.io/open-data/licence/readme_en/" target="_blank" rel="noopener">licence</a>).</footer>
   </div>
   <div id="app" hidden>
     <div class="tiles" id="tiles"></div>
@@ -855,21 +858,65 @@ const latToY = (lat, z) => { const c = Math.max(-85.0511, Math.min(85.0511, lat)
   return (1 - Math.log(Math.tan(c) + 1 / Math.cos(c)) / Math.PI) / 2 * TILE * 2 ** z; };
 const xToLon = (x, z) => x / (TILE * 2 ** z) * 360 - 180;
 const yToLat = (y, z) => 180 / Math.PI * Math.atan(Math.sinh(Math.PI - 2 * Math.PI * y / (TILE * 2 ** z)));
-const mapState = Object.assign({ lat: null, lon: null, z: 6, radar: true }, load('wh.map') || {});
-const radarState = { host: '', frames: [], i: 0, asked: 0, error: '', playing: 0, hold: 0 };
+const mapState = Object.assign({ lat: null, lon: null, z: 6, radar: true, src: 'world', alerts: false }, load('wh.map') || {});
+const radarState = { src: '', host: '', frames: [], i: 0, asked: 0, error: '', playing: 0, hold: 0 };
+
+// North America: the Meteorological Service of Canada's GeoMet WMS (as the desktop app's radar.cpp).
+// Its usage policy: a meaningful client, no bulk tile retrieval, contact above ~1 request a second
+// for an application as a whole. So frames 12 minutes apart, tiles only for the view, none outside
+// each layer's bounding box.
+const MSC = 'https://geo.weather.gc.ca/geomet', MSC_MAXZ = 8, MSC_STEP = 720, HALF = 20037508.342789244;
+const MSC_BOX = { radar: [-171, 16, -49, 68], alerts: [-142, 41, -52, 84] };   // west, south, east, north
+function mscCovers(layer, z, x, y) {
+  const n = 2 ** z, b = MSC_BOX[layer], lat = t => Math.atan(Math.sinh(Math.PI * (1 - 2 * t / n))) * 180 / Math.PI;
+  return (x + 1) / n * 360 - 180 > b[0] && x / n * 360 - 180 < b[2] && lat(y) > b[1] && lat(y + 1) < b[3];
+}
+function mscUrl(layer, time, z, x, y) {
+  const s = 2 * HALF / 2 ** z, minx = -HALF + x * s, maxy = HALF - y * s;
+  return MSC + '?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&FORMAT=image/png&TRANSPARENT=TRUE&CRS=EPSG:3857&WIDTH=512&HEIGHT=512&BBOX=' +
+    [minx, maxy - s, minx + s, maxy].map(v => v.toFixed(2)).join(',') +
+    (layer === 'radar' ? '&LAYERS=Radar_1km_SfcPrecipType&STYLES=SfcPrecipType_Dis&TIME=' + new Date(time * 1000).toISOString().replace('.000', '')
+                       : '&LAYERS=Current-Alerts&STYLES=Current-Alerts&SLOT=' + time);
+}
+// The radar layer's time dimension ("start/end/PT6M" or a comma list) as frames MSC_STEP apart.
+function mscFrames(xml) {
+  const m = /<Dimension name="time"[^>]*>([^<]*)</.exec(xml);
+  if (!m) throw new Error('no radar times');
+  const v = m[1].trim(), have = [];
+  if (v.includes('/')) {
+    const [a, b, p] = v.split('/'), start = Date.parse(a) / 1000, end = Date.parse(b) / 1000;
+    const per = /^PT(\d+)([HMS])$/.exec(p), step = per ? +per[1] * { H: 3600, M: 60, S: 1 }[per[2]] : 0;
+    if (!(start <= end) || !step) throw new Error('no radar times');
+    for (let t = end; t >= start && have.length < 64; t -= step) have.push(t);
+  } else {
+    for (const s of v.split(',').slice(-64).reverse()) { const t = Date.parse(s) / 1000; if (t >= 0) have.push(t); }
+  }
+  if (!have.length) throw new Error('no radar times');
+  return have.filter(t => (have[0] - t) % MSC_STEP === 0).slice(0, 16).reverse().map(t => ({ time: t }));
+}
 
 async function loadFrames() {
+  const src = mapState.src;
   radarState.asked = Date.now();
   try {
-    const r = await fetch('https://api.rainviewer.com/public/weather-maps.json');
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const j = await r.json();
-    const past = (j.radar && j.radar.past) || [];
-    if (!/^https:\/\//.test(j.host || '') || !past.length) throw new Error('no radar frames');
-    const atLatest = !radarState.frames.length || radarState.i >= radarState.frames.length - 1;
-    radarState.host = j.host; radarState.frames = past.slice(-16); radarState.error = '';
+    let host = '', frames;
+    if (src === 'na') {
+      const r = await fetch(MSC + '?service=WMS&version=1.3.0&request=GetCapabilities&layer=Radar_1km_SfcPrecipType');
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      frames = mscFrames(await r.text());
+    } else {
+      const r = await fetch('https://api.rainviewer.com/public/weather-maps.json');
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const j = await r.json();
+      const past = (j.radar && j.radar.past) || [];
+      if (!/^https:\/\//.test(j.host || '') || !past.length) throw new Error('no radar frames');
+      host = j.host; frames = past.slice(-16);
+    }
+    if (src !== mapState.src) return;   // the source changed meanwhile
+    const atLatest = radarState.src !== src || !radarState.frames.length || radarState.i >= radarState.frames.length - 1;
+    radarState.src = src; radarState.host = host; radarState.frames = frames; radarState.error = '';
     if (!radarState.playing || atLatest) radarState.i = radarState.frames.length - 1;
-  } catch (e) { radarState.error = e.message; }
+  } catch (e) { if (src === mapState.src) radarState.error = e.message; }
   if (state.tab === 'map') renderMap();
 }
 
@@ -907,17 +954,25 @@ function renderMap() {
         Math.round(oy + ty * TILE) + 'px" src="https://tile.openstreetmap.org/' + z + '/' + wx + '/' + ty + '.png">');
     }
   }
-  // Radar: one 512 px tile at zoom zr covers 2^(z-zr) map tiles each way.
-  const rs = radarState, f = rs.frames[rs.i];
-  if (mapState.radar && f) {
-    const zr = Math.min(z - 1, RADAR_MAXZ), RT = TILE * 2 ** (z - zr), nr = 2 ** zr;
+  // Overlays: one 512 px tile at zoom zr covers 2^(z-zr) map tiles each way.
+  const overlay = (cls, maxz, url) => {
+    const zr = Math.min(z - 1, maxz), RT = TILE * 2 ** (z - zr), nr = 2 ** zr;
     for (let ty = Math.max(0, Math.floor(-oy / RT)); ty <= Math.min(nr - 1, Math.floor((H - oy) / RT)); ty++) {
       for (let tx = Math.floor(-ox / RT); tx <= Math.floor((W - ox) / RT); tx++) {
-        const wx = ((tx % nr) + nr) % nr;
-        html.push('<img class="radar" alt="" width="' + RT + '" height="' + RT + '" style="left:' + Math.round(ox + tx * RT) +
-          'px;top:' + Math.round(oy + ty * RT) + 'px" src="' + rs.host + f.path + '/512/' + zr + '/' + wx + '/' + ty + '/2/1_1.png">');
+        const wx = ((tx % nr) + nr) % nr, src = url(zr, wx, ty);
+        if (src) html.push('<img class="' + cls + '" alt="" width="' + RT + '" height="' + RT + '" style="left:' + Math.round(ox + tx * RT) +
+          'px;top:' + Math.round(oy + ty * RT) + 'px" src="' + src + '">');
       }
     }
+  };
+  if (mapState.alerts) {   // the alerts in effect: asked for again every 10 minutes
+    const slot = Math.floor(Date.now() / 600e3) * 600;
+    overlay('alerts', MSC_MAXZ, (zr, x, y) => mscCovers('alerts', zr, x, y) ? mscUrl('alerts', slot, zr, x, y) : '');
+  }
+  const rs = radarState, f = rs.src === mapState.src ? rs.frames[rs.i] : null, na = mapState.src === 'na';
+  if (mapState.radar && f) {
+    if (na) overlay('radar', MSC_MAXZ, (zr, x, y) => mscCovers('radar', zr, x, y) ? mscUrl('radar', f.time, zr, x, y) : '');
+    else overlay('radar', RADAR_MAXZ, (zr, x, y) => rs.host + f.path + '/512/' + zr + '/' + x + '/' + y + '/2/1_1.png');
   }
   if (state.loc) {   // the page's place, with its temperature now
     let x = ox + lonToX(state.loc.lon, z); const world = TILE * n;
@@ -932,21 +987,38 @@ function renderMap() {
     else {
       label = 'Radar ' + new Date(f.time * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) +
         (rs.i === rs.frames.length - 1 ? ' (latest)' : ' (' + (rs.i + 1) + ' of ' + rs.frames.length + ')');
-      if (z - 1 > RADAR_MAXZ) label += ' · coarser than the map at this zoom';
+      if (na) label += ' · North America only';
+      if (z - 1 > (na ? MSC_MAXZ : RADAR_MAXZ)) label += ' · coarser than the map at this zoom';
     }
   }
+  const sw = cs => cs.map(c => '<i class="sw2" style="background:' + c + '"></i>').join('');
   html.push('<div class="mapnote" style="left:8px;top:8px;font-weight:600">' + esc(label) + '</div>');
+  if (mapState.alerts) {
+    html.push('<div class="mapnote" style="left:8px;top:34px">Alerts ' + sw(['#ffff00', '#ffa500', '#ff0000']) + ' yellow, orange, red &nbsp;' +
+      sw(['#d3d3d3']) + ' statement</div>');
+  }
+  const eccc = (mapState.radar && na) || mapState.alerts;
   html.push('<div class="mapnote" style="right:4px;bottom:4px">© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors' +
-    (mapState.radar ? ' · Weather data by <a href="https://www.rainviewer.com/" target="_blank" rel="noopener">RainViewer</a>' : '') + '</div>');
-  if (mapState.radar) {
-    const sw = cs => cs.map(c => '<i class="sw2" style="background:' + c + '"></i>').join('');
-    html.push('<div class="mapnote" style="left:8px;bottom:8px;line-height:1.6">Rain light ' +
-      sw(['#36bae5', '#0077aa', '#004768', '#ffc500', '#ff4400', '#c10000', '#ff77ff']) + ' very heavy<br>Snow light ' +
-      sw(['#c4ffff', '#7fbfff', '#2f6fff', '#0022ff']) + ' heavy</div>');
+    (mapState.radar && !na ? ' · Weather data by <a href="https://www.rainviewer.com/" target="_blank" rel="noopener">RainViewer</a>' : '') +
+    (eccc ? ' · Data Source: <a href="https://eccc-msc.github.io/open-data/licence/readme_en/" target="_blank" rel="noopener">Environment and Climate Change Canada</a>' : '') +
+    '</div>');
+  if (mapState.radar) {   // above the credits, which can be as wide as the map on a phone
+    if (na) {
+      html.push('<div class="mapnote" style="left:8px;bottom:30px;line-height:1.6">Rain ' + sw(['#9afd9a', '#00cb00', '#008000']) +
+        ' &nbsp;Snow ' + sw(['#7fdfeb', '#47a4f0', '#0000e0']) + ' &nbsp;Mixed ' + sw(['#e0bde6', '#c36dd2', '#9b27af']) +
+        '<br>Freezing rain ' + sw(['#fecbc8', '#fe1e0d']) + ' &nbsp;Hail ' + sw(['#fec007']) + ' &nbsp;(light → heavy)</div>');
+    } else {
+      html.push('<div class="mapnote" style="left:8px;bottom:30px;line-height:1.6">Rain light ' +
+        sw(['#36bae5', '#0077aa', '#004768', '#ffc500', '#ff4400', '#c10000', '#ff77ff']) + ' very heavy<br>Snow light ' +
+        sw(['#c4ffff', '#7fbfff', '#2f6fff', '#0022ff']) + ' heavy</div>');
+    }
   }
   box.innerHTML = html.join('');
   updateAgo();
   $('mRadar').classList.toggle('on', mapState.radar);
+  $('mWorld').classList.toggle('on', !na); $('mNA').classList.toggle('on', na);
+  $('mWorld').disabled = $('mNA').disabled = !mapState.radar;
+  $('mAlerts').classList.toggle('on', mapState.alerts);
   $('mPlay').classList.toggle('on', !!rs.playing);
   for (const id of ['mPrev', 'mPlay', 'mNext']) $(id).disabled = !mapState.radar || rs.frames.length < 2;
   $('mOut').disabled = z <= MINZ; $('mIn').disabled = z >= MAXZ;
@@ -1004,6 +1076,14 @@ function setPlaying(on) {
   box.addEventListener('wheel', e => { e.preventDefault(); const r = box.getBoundingClientRect();
     zoomMap(e.deltaY < 0 ? 1 : -1, e.clientX - r.left, e.clientY - r.top); }, { passive: false });
   $('mRadar').onclick = () => { mapState.radar = !mapState.radar; if (!mapState.radar) setPlaying(false); saveMap(); renderMap(); };
+  const setSrc = src => {
+    if (src === mapState.src) return;
+    mapState.src = src; saveMap(); setPlaying(false);
+    radarState.frames = []; radarState.i = 0; radarState.error = '';
+    loadFrames(); renderMap();
+  };
+  $('mWorld').onclick = () => setSrc('world'); $('mNA').onclick = () => setSrc('na');
+  $('mAlerts').onclick = () => { mapState.alerts = !mapState.alerts; saveMap(); renderMap(); };
   $('mPrev').onclick = () => { setPlaying(false); stepFrame(-1); };
   $('mNext').onclick = () => { setPlaying(false); stepFrame(1); };
   $('mPlay').onclick = () => setPlaying(!radarState.playing);
@@ -1099,6 +1179,10 @@ function locFromHash() {
 // #...&tab=now or &tab=map opens on that tab (a bookmark for a phone's home screen).
 const hashTab = /(?:^|[#&])tab=(now|map)(?:&|$)/.exec(location.hash);
 if (hashTab) state.tab = hashTab[1];
+// ...&radar=na or &radar=world and &alerts=1 or 0 choose the map's overlays the same way.
+const hashMap = new URLSearchParams(location.hash.slice(1));
+if (/^(na|world)$/.test(hashMap.get('radar') || '')) mapState.src = hashMap.get('radar');
+if (/^[01]$/.test(hashMap.get('alerts') || '')) mapState.alerts = hashMap.get('alerts') === '1';
 const saved = locFromHash() || load('wh.loc');
 if (saved) loadLocation(saved); else renderAll();
 </script>

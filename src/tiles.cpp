@@ -146,10 +146,11 @@ void TileStore::Evict() {
     }
 }
 
-void TileStore::RequestFrames() {
+void TileStore::RequestFrames(radar::Source source) {
     {
         std::lock_guard<std::mutex> lock(mu_);
         framesWanted_ = true;
+        framesSource_ = source;
         missing_.clear();   // a tile that failed earlier gets another chance
     }
     cv_.notify_one();
@@ -221,6 +222,7 @@ void TileStore::Run() {
     for (;;) {   // the service loop: ends on Stop()
         Job job;
         bool frames = false;
+        radar::Source source = radar::Source::World;
         {
             std::unique_lock<std::mutex> lock(mu_);
             cv_.wait(lock, [this] { return stop_ || framesWanted_ || !jobs_.empty(); });
@@ -228,6 +230,7 @@ void TileStore::Run() {
             if (framesWanted_) {
                 framesWanted_ = false;
                 frames = true;
+                source = framesSource_;
             } else {
                 job = std::move(jobs_.back());   // newest first: what is on screen now
                 jobs_.pop_back();
@@ -239,15 +242,19 @@ void TileStore::Run() {
         }
         if (frames) {
             HttpClient http;
+            http.UseAppIdentity();
             auto buf = std::make_unique<char[]>(256 * 1024);
             HttpResult hr;
             std::wstring err;
             radar::Frames f;
-            const bool ok = http.Get(radar::kFramesUrl, buf.get(), 256 * 1024, hr, err) && hr.status == 200 &&
-                            radar::ParseFrames(std::string_view(buf.get(), hr.length), f, err);
-            if (err.empty() && !ok) { err = L"RainViewer answered HTTP " + std::to_wstring(hr.status); }
+            const bool msc = source == radar::Source::NorthAmerica;
+            const bool got = http.Get(msc ? radar::kMscCapsUrl : radar::kFramesUrl, buf.get(), 256 * 1024, hr, err) && hr.status == 200;
+            const std::string_view body(buf.get(), got ? hr.length : 0);
+            const bool ok = got && (msc ? radar::ParseMscTimes(body, f, err) : radar::ParseFrames(body, f, err));
+            if (err.empty() && !ok) { err = (msc ? L"GeoMet" : L"RainViewer") + std::wstring(L" answered HTTP ") + std::to_wstring(hr.status); }
             {
                 std::lock_guard<std::mutex> lock(mu_);
+                if (framesWanted_ && framesSource_ != source) { continue; }   // the source changed meanwhile: that list is wanted now
                 frames_ = ok ? f : radar::Frames{};
                 framesErr_ = err;
                 framesReady_ = true;
@@ -279,17 +286,21 @@ void TileStore::Run() {
 }
 
 void TileStore::CleanOldRadar() {
-    // Radar tiles are named radar_<unix time>_z_x_y; frames older than kRadarMaxAge are no longer listed.
-    WIN32_FIND_DATAW fd{};
-    HANDLE find = FindFirstFileW((dir_ + L"\\radar_*.png").c_str(), &fd);
-    if (find == INVALID_HANDLE_VALUE) { return; }
+    // Radar and alert tiles are named radar_<unix time>_... and alerts_<unix time>_...;
+    // ones older than kRadarMaxAge are no longer listed or no longer current.
     const int64_t cutoff = NowUnix() - kRadarMaxAge;
-    for (int i = 0; i < kMaxCleanFiles; ++i) {
-        const int64_t t = _wtoi64(fd.cFileName + 6);
-        if (t > 0 && t < cutoff) { DeleteFileW((dir_ + L"\\" + fd.cFileName).c_str()); }
-        if (!FindNextFileW(find, &fd)) { break; }
+    for (const wchar_t* prefix : { L"radar_", L"alerts_" }) {
+        const size_t skip = wcslen(prefix);
+        WIN32_FIND_DATAW fd{};
+        HANDLE find = FindFirstFileW((dir_ + L"\\" + prefix + L"*.png").c_str(), &fd);
+        if (find == INVALID_HANDLE_VALUE) { continue; }
+        for (int i = 0; i < kMaxCleanFiles; ++i) {
+            const int64_t t = _wtoi64(fd.cFileName + skip);
+            if (t > 0 && t < cutoff) { DeleteFileW((dir_ + L"\\" + fd.cFileName).c_str()); }
+            if (!FindNextFileW(find, &fd)) { break; }
+        }
+        FindClose(find);
     }
-    FindClose(find);
 }
 
 } // namespace wt

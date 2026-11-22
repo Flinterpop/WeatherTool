@@ -1,9 +1,23 @@
-// RainViewer's free weather-radar API for the Map tab: the frame list and the
-// tile addresses. Free for personal and educational use with credit to
-// RainViewer; since January 2026 it serves only the past 2 hours (10-minute
-// frames), zoom 7 at most, one colour scheme (2, "Universal Blue"), and at
-// most 100 requests a minute per address (rainviewer.com/api, read
-// 21 Nov 2026). UI-free and unit-tested.
+// The Map tab's two radar sources and the weather-alert overlay: frame lists
+// and tile addresses. UI-free and unit-tested.
+//
+// World: RainViewer's free weather-radar API. Free for personal and
+// educational use with credit to RainViewer; since January 2026 it serves only
+// the past 2 hours (10-minute frames), zoom 7 at most, one colour scheme (2,
+// "Universal Blue"), and at most 100 requests a minute per address
+// (rainviewer.com/api, read 21 Nov 2026).
+//
+// North America: the Meteorological Service of Canada's GeoMet WMS, read
+// 22 Nov 2026. Open licence (ECCC Data Services End-use Licence), anonymous,
+// credit "Data Source: Environment and Climate Change Canada". Its usage
+// policy asks for a meaningful User-Agent, no no-cache headers, no bulk or
+// batch tile retrieval, and contact above 86,400 requests a day (about one a
+// second) for an application as a whole. So frames are taken 12 minutes apart
+// (the layer has one every 6), tiles only for what is on screen, and none
+// outside the layer's own bounding box. The radar layer is the 1 km North
+// American composite of surface precipitation type (rain, snow, mixed,
+// freezing rain, each light to heavy), the last 3 hours; the alerts layer has
+// no time and shows the alerts in effect.
 #pragma once
 
 #include <array>
@@ -18,16 +32,27 @@ constexpr int     kMaxZoom     = 7;     // RainViewer's free limit
 constexpr int     kTileSize    = 512;   // one 512 px tile at zoom z-1 covers four 256 px map tiles at z
 constexpr size_t  kMaxFrames   = 16;    // 2 hours at 10 minutes is 13
 
+enum class Source : int { World = 0, NorthAmerica = 1 };
+
+constexpr wchar_t kMscCapsUrl[] =
+    L"https://geo.weather.gc.ca/geomet?service=WMS&version=1.3.0&request=GetCapabilities&layer=Radar_1km_SfcPrecipType";
+constexpr int     kMscMaxZoom  = 8;      // the radar is 1 km: closer than this, tiles are only scaled up
+constexpr int64_t kMscStep     = 720;    // seconds between frames shown (the layer has one every 6 minutes)
+
 struct Frame {
     int64_t      time = 0;   // Unix time of the radar picture
-    std::wstring path;       // "/v2/radar/1609401600"
+    std::wstring path;       // RainViewer: "/v2/radar/1609401600"; GeoMet: empty
 };
 
 struct Frames {
-    std::wstring host;       // "https://tilecache.rainviewer.com"
+    Source       source = Source::World;
+    std::wstring host;       // RainViewer: "https://tilecache.rainviewer.com"; GeoMet: empty
     std::array<Frame, kMaxFrames> frame{};
     size_t count = 0;        // oldest first
 };
+
+// The highest radar tile zoom the source serves.
+int MaxZoom(Source s);
 
 // The frame list. False, with why, when it has no host or no past frames.
 bool ParseFrames(std::string_view json, Frames& out, std::wstring& error);
@@ -35,5 +60,23 @@ bool ParseFrames(std::string_view json, Frames& out, std::wstring& error);
 // One radar tile: scheme 2, smoothed, snow shown in its own colours. Only a
 // host that starts with "https://" and a path that starts with "/" are used.
 std::wstring TileUrl(const Frames& f, size_t frame, int z, int x, int y);
+
+// GeoMet: the radar layer's time dimension from its GetCapabilities
+// ("start/end/PT6M", or a comma list), as up to kMaxFrames frames kMscStep
+// apart ending at the latest. False, with why, when there is none.
+bool ParseMscTimes(std::string_view xml, Frames& out, std::wstring& error);
+
+// "2026-11-22T01:54:00Z" to Unix time; -1 when it is not that shape.
+int64_t ParseIsoUtc(std::string_view s);
+std::wstring IsoUtc(int64_t t);
+
+enum class MscLayer { Radar, Alerts };
+
+// A 512 px GetMap of one Web Mercator tile (z, x, y) of the layer; `time` is
+// the radar frame (ignored for alerts).
+std::wstring MscTileUrl(MscLayer layer, int64_t time, int z, int x, int y);
+
+// Whether the tile touches the layer's bounding box (no request otherwise).
+bool MscCovers(MscLayer layer, int z, int x, int y);
 
 } // namespace wt::radar

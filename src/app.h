@@ -51,6 +51,12 @@ private:
     void PaintMap(Gdiplus::Graphics& g);
     void PaintMapOverlays(Gdiplus::Graphics& g, const Gdiplus::RectF& r);
     void PaintRadarAge(Gdiplus::Graphics& g);
+    void PaintRadar(Gdiplus::Graphics& g, const Gdiplus::RectF& r, double ox, double oy);
+    void PaintAlerts(Gdiplus::Graphics& g, const Gdiplus::RectF& r, double ox, double oy);
+    void PaintPrecipTypeKey(Gdiplus::Graphics& g, const Gdiplus::RectF& r);
+    void PaintAlertsKey(Gdiplus::Graphics& g, Gdiplus::REAL y, const Gdiplus::RectF& r);
+    std::wstring MapCredit() const;
+    radar::Source RadarSource() const { return static_cast<radar::Source>(cfg_.state.radarSrc); }
     void InvalidateMap();   // the map and its age label
     void PaintMarkers(Gdiplus::Graphics& g, const Gdiplus::RectF& r, double ox, double oy);   // screen = o + map px * scale
     void CenterMapOn(size_t index);
@@ -142,6 +148,9 @@ private:
     HWND      hNext_ = nullptr;
     HWND      hZoomOut_ = nullptr;
     HWND      hZoomIn_ = nullptr;
+    HWND      hWorld_ = nullptr;     // radar source: RainViewer (world) or GeoMet (North America)
+    HWND      hNAmerica_ = nullptr;
+    HWND      hAlerts_ = nullptr;    // MSC weather alerts on/off
     std::array<HWND, kViewCount> hViews_{};
     std::array<HWND, kRangeYears.size()> hRanges_{};
     std::array<HWND, 3> hMeasures_{};

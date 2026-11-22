@@ -461,6 +461,30 @@ void TestMap() {
     CHECK(!radar::ParseFrames(R"({"host":"http://plain.example","radar":{"past":[{"time":1,"path":"/a"}]}})", f, err));
     CHECK(!radar::ParseFrames(R"({"host":"https://x","radar":{"past":[]}})", f, err) && err.find(L"no radar frames") != std::wstring::npos);
     CHECK(!radar::ParseFrames(R"({"host":"https://x","radar":{"past":[{"time":1,"path":"no-slash"}]}})", f, err));
+    CHECK(f.source == radar::Source::World);
+
+    // GeoMet: times, every 12 minutes back from the newest, oldest first.
+    CHECK(radar::ParseIsoUtc("2026-11-22T01:54:00Z") == 1795312440);
+    CHECK(radar::IsoUtc(1795312440) == L"2026-11-22T01:54:00Z");
+    CHECK(radar::ParseIsoUtc("2026-11-22 01:54:00") == -1 && radar::ParseIsoUtc("2026-13-22T01:54:00Z") == -1);
+    radar::Frames m;
+    CHECK(radar::ParseMscTimes(R"(<Layer><Dimension name="time" units="ISO8601" default="2026-11-22T01:54:00Z" )"
+                               R"(nearestValue="0">2026-11-21T22:54:00Z/2026-11-22T01:54:00Z/PT6M</Dimension></Layer>)", m, err));
+    CHECK(m.source == radar::Source::NorthAmerica && m.count == 16);
+    CHECK(m.frame[0].time == 1795301640 && m.frame[15].time == 1795312440 && m.frame[15].time - m.frame[14].time == 720);
+    CHECK(radar::ParseMscTimes(R"(<Dimension name="time">2026-11-22T01:00:00Z,2026-11-22T01:06:00Z,2026-11-22T01:12:00Z</Dimension>)", m, err));
+    CHECK(m.count == 2 && m.frame[1].time - m.frame[0].time == 720);
+    CHECK(!radar::ParseMscTimes("<ServiceException>Layer not available</ServiceException>", m, err) && !err.empty());
+    CHECK(!radar::ParseMscTimes(R"(<Dimension name="time">2026-11-22T01:00:00Z/2026-11-21T01:00:00Z/PT6M</Dimension>)", m, err));
+    const std::wstring u = radar::MscTileUrl(radar::MscLayer::Radar, 1795312440, 0, 0, 0);
+    CHECK(u.rfind(L"https://geo.weather.gc.ca/geomet?", 0) == 0);
+    CHECK(u.find(L"&BBOX=-20037508.34,-20037508.34,20037508.34,20037508.34") != std::wstring::npos);
+    CHECK(u.find(L"&LAYERS=Radar_1km_SfcPrecipType&STYLES=SfcPrecipType_Dis&TIME=2026-11-22T01:54:00Z") != std::wstring::npos);
+    CHECK(radar::MscTileUrl(radar::MscLayer::Alerts, 0, 6, 18, 23).find(L"&LAYERS=Current-Alerts") != std::wstring::npos);
+    CHECK(radar::MscCovers(radar::MscLayer::Radar, 6, 18, 23) && radar::MscCovers(radar::MscLayer::Alerts, 6, 18, 23));  // Ottawa
+    CHECK(radar::MscCovers(radar::MscLayer::Radar, 6, 17, 27) && !radar::MscCovers(radar::MscLayer::Alerts, 6, 17, 27)); // Miami
+    CHECK(!radar::MscCovers(radar::MscLayer::Radar, 6, 32, 21));                                                         // Europe
+    CHECK(radar::MaxZoom(radar::Source::World) == 7 && radar::MaxZoom(radar::Source::NorthAmerica) == 8);
 }
 
 void TestConfig() {
@@ -495,6 +519,9 @@ void TestConfig() {
     CHECK(back.units == Units::Imperial && back.theme == ThemeMode::Dark);
     CHECK(back.state.view == 2 && back.state.selected == 1 && back.state.tab == 1);
     CHECK(!back.state.hasMap && back.state.mapZoom == 6 && back.state.radar);   // map defaults
+    CHECK(back.state.radarSrc == 0 && !back.state.alerts);
+    back.state.radarSrc = 1;
+    back.state.alerts = true;
     back.state.hasMap = true;
     back.state.mapLat = 45.5;
     back.state.mapLon = -73.6;
@@ -505,6 +532,7 @@ void TestConfig() {
     Config mapBack;
     CHECK(LoadConfig(dir, mapBack, err) && mapBack.state.hasMap && Near(mapBack.state.mapLat, 45.5) &&
           Near(mapBack.state.mapLon, -73.6) && mapBack.state.mapZoom == 9 && !mapBack.state.radar && mapBack.state.tab == 2);
+    CHECK(mapBack.state.radarSrc == 1 && mapBack.state.alerts);
     CHECK(!back.serverEnabled && back.serverPort == 8765);   // defaults
     back.serverEnabled = true;
     back.serverPort = 9001;
