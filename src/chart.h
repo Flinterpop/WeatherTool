@@ -73,6 +73,9 @@ struct HeatmapInput {
 };
 
 void DrawBandChart(Gdiplus::Graphics& g, const Gdiplus::RectF& rc, const BandChartInput& in, float scale);
+// The slot of an n-slot band chart drawn in `rc` under client x, or -1 when x
+// is outside its plot (the same geometry DrawBandChart uses).
+int BandChartSlotAt(const Gdiplus::RectF& rc, size_t n, float x, float scale);
 void DrawHeatmap(Gdiplus::Graphics& g, const Gdiplus::RectF& rc, const HeatmapInput& in, float scale);
 
 // Font size in px for a point size at 96 dpi.

@@ -12,8 +12,9 @@
 
 namespace wt {
 
-constexpr size_t kForecastHours = 48;
 constexpr size_t kForecastDays  = 16;
+constexpr size_t kForecastHours = kForecastDays * 24;   // every hour of every forecast day
+constexpr size_t kNextHours     = 48;                   // the Now tab's top chart by default
 
 // A local date and time at the place, as the provider gives it.
 struct LocalTime {
@@ -37,10 +38,12 @@ struct Forecast {
     int          code = -1;            // WMO weather code, -1 = unknown
     bool         isDay = true;
 
-    // Hourly, from the current hour on.
+    // Hourly, from midnight today for all 16 days. Wind, gusts and cloud
+    // cover are NaN when a cached reply from before 0.6.0 lacks them.
     size_t hours = 0;
     std::array<LocalTime, kForecastHours> hTime{};
     std::array<double, kForecastHours>    hTemp{}, hFeels{}, hProb{}, hPrecip{}, hSnow{};
+    std::array<double, kForecastHours>    hWind{}, hGust{}, hCloud{};
     std::array<int, kForecastHours>       hCode{};
 
     // Daily, from today on.
@@ -73,5 +76,9 @@ int64_t LocalSeconds(const LocalTime& t);
 // when every slot is in the past.
 size_t FirstHourFrom(const Forecast& f, int64_t now);
 size_t FirstDayFrom(const Forecast& f, int64_t now);
+
+// The hourly slots of daily slot `day`: [first, first + count). count is 0
+// when the reply has no hours for that date.
+void HoursOfDay(const Forecast& f, size_t day, size_t& first, size_t& count);
 
 } // namespace wt

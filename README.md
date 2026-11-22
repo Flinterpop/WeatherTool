@@ -8,7 +8,7 @@
 
 *Last updated: 21 Nov 2026*
 
-A Win32 C++ desktop app that shows **historical temperature and snowfall** for the places you choose, from 1940 to last month, as annual and monthly trends, and on a second tab **the weather now and the forecast**. It follows StockTool's layout: a list of places on the left, the History and Now tabs, view buttons and a header with the headline figures across the top, and two charts with a hover tooltip. Plain Win32, GDI+ and WinHTTP; no frameworks and no third-party libraries.
+A Win32 C++ desktop app that shows **historical temperature and snowfall** for the places you choose, from 1940 to last month, as annual and monthly trends; on a second tab **the weather now and the forecast**; and on a third **a map with the weather radar**. It follows StockTool's layout: a list of places on the left, the History, Now and Map tabs, view buttons and a header with the headline figures across the top, and two charts with a hover tooltip. Plain Win32, GDI+ and WinHTTP; no frameworks and no third-party libraries.
 
 ## Installing
 
@@ -49,14 +49,24 @@ It is only ever started by you, never in the background. The repository is publi
 The weather now and the forecast for the selected place. Ctrl+Tab switches between the tabs, and Ctrl+1 to Ctrl+4 go back to a History view.
 
 - **Header:** the temperature and feels-like now, today's high and low against the 1991–2020 normal for the time of year, the wind (speed, direction, gusts), and today's rain or snow with its chance, plus the snow on the ground (or the humidity when there is none). The line under the name gives the conditions, the time at the place and when the forecast was fetched.
-- **Next 48 hours:** hourly temperature and feels-like, in the place's local time. The tooltip adds the conditions, the chance of precipitation, the amount, and the snowfall.
+- **Next 48 hours:** hourly temperature and feels-like, in the place's local time. The tooltip adds the conditions, the chance of precipitation, the amount, the snowfall, the wind and gusts, and the cloud cover.
+- **Click a day** in the 16-day chart to see that day hour by hour in the chart above; click it again, or press Esc, to go back to the next 48 hours.
 - **Next 16 days:** the daily high and low, with the 1991–2020 normal high and low dashed. The normal comes from the place's own history (each month's average, interpolated between mid-month values so it changes smoothly), so it appears once the history has downloaded. Under each day: a weather symbol and the rain (mm) or snow (cm) expected. Today is shaded.
 - **The list** shows each place's temperature and conditions now, and today's high and low, instead of last year's figures.
 - **°F / in** switches this tab too, with wind in mph and rain in inches.
 
+## Map tab
+
+A map of your places with the weather radar over it.
+
+- **The map** is OpenStreetMap's. Drag to move it, the mouse wheel or **− / +** to zoom (zoom 3 to 12), and click a place's marker to select it. Each marker shows the place's temperature now. Selecting a place in the list centres the map on it, and the map remembers where it was.
+- **Radar** (the **Radar** button turns it on and off) is RainViewer's: rain from light blue to yellow, red and pink for very heavy, snow in pale to deep blue (a legend is on the map). **◀ / ▶** step through the past 2 hours in 10-minute pictures and **Play** animates them, holding on the latest. The top-left label gives the picture's time.
+- **Limits of the free radar:** past pictures only (no forecast frames), and regional detail only: RainViewer serves zoom 7 at most, so above map zoom 8 the radar is enlarged and the label says it is coarser than the map.
+- **Being a good citizen of both services:** the app asks only for the tiles on screen (no prefetching or offline download, as OpenStreetMap requires), identifies itself honestly, keeps map tiles for 7 days and radar pictures for 3 hours, and keeps radar requests under RainViewer's limit of 100 a minute. Both credits are shown on the map. In the dark theme the map is dimmed.
+
 ## Web server (for a phone or tablet)
 
-**File > Web server** serves a browser version of WeatherTool to other devices on your network, such as an iPad. The browser version is one HTML page with the same views and the same History and Now tabs, compiled into the exe. Adding `&tab=now` to the page's address (after `#lat=…&lon=…&name=…`) opens it on the Now tab, which suits a bookmark on a phone's home screen; the Now tab refreshes itself every 15 minutes while it is open. Tick the menu item and the status line shows the address to open, such as `http://192.168.1.10:8765/`; **File > Open web page in browser** opens it on this PC. The tick is remembered, so the server starts with the app next time.
+**File > Web server** serves a browser version of WeatherTool to other devices on your network, such as an iPad. The browser version is one HTML page with the same views and the same History and Now tabs, compiled into the exe. Adding `&tab=now` or `&tab=map` to the page's address (after `#lat=…&lon=…&name=…`) opens it on that tab, which suits a bookmark on a phone's home screen; the Now tab refreshes itself every 15 minutes while it is open. The browser's Map tab works like the app's (drag, scroll or pinch to zoom), showing the page's one place. Tick the menu item and the status line shows the address to open, such as `http://192.168.1.10:8765/`; **File > Open web page in browser** opens it on this PC. The tick is remembered, so the server starts with the app next time.
 
 - The port is 8765 unless `WeatherTool.ini` says otherwise (`[server]` `port=`). If another program already uses the port, WeatherTool says so and leaves the server off.
 - It serves that page and the icon and nothing else: no files from disk, none of the app's settings or cached data, and only GET and HEAD. The page fetches its own data from Open-Meteo, in the browser that opens it. Each browser remembers its own places, in its local storage.
@@ -68,14 +78,15 @@ Data comes from the [Open-Meteo](https://open-meteo.com/) historical weather API
 
 - A month counts only when at most one day is missing, so the current month and the current year are left out until they are complete.
 - The first download for a place fetches every day since 1940 (about 1 MB). After that only the last few months are fetched, re-taking the two latest complete months because ERA5's preliminary values are revised for a while. The app checks for updates at start and every 30 minutes, for places not updated in the last 6 hours; F5 forces it.
-- **The Now tab** uses Open-Meteo's forecast API, which blends national weather services' models for the place. One request per place brings the conditions now, 48 hours and 16 days (about 4 KB). Open-Meteo updates current conditions every 15 minutes, so the app asks at most that often, and only while the Now tab is showing; F5 there forces it. The last reply is kept on disk, so the tab opens with the previous forecast and its time until the new one arrives, and hours and days already past are dropped.
+- **The Now tab** uses Open-Meteo's forecast API, which blends national weather services' models for the place. One request per place brings the conditions now and every hour of the 16 days (about 25 KB); the Map tab's markers use the same. Open-Meteo updates current conditions every 15 minutes, so the app asks at most that often, and only while the Now tab is showing; F5 there forces it. The last reply is kept on disk, so the tab opens with the previous forecast and its time until the new one arrives, and hours and days already past are dropped.
+- **The Map tab** uses OpenStreetMap's standard tiles (tile.openstreetmap.org, under its [tile usage policy](https://operations.osmfoundation.org/policies/tiles/)) and RainViewer's free [Weather Maps API](https://www.rainviewer.com/api.html) (personal and educational use, credit required). Neither needs a key.
 - **Rate limits.** Open-Meteo's free tier allows 600 calls a minute, 5,000 an hour and 10,000 a day, and a whole-history download counts as roughly 400 calls (measured 21 Nov 2026). Adding several places at once therefore hits the per-minute limit: the app waits out a short `Retry-After` and tries again, up to three times. When the server asks for a longer wait (the hourly or daily limit), the app stops calling Open-Meteo until then, shows the time it will resume, and the next periodic update picks up from there.
 
 ## Where it keeps things
 
 Files only, never the registry:
 
-- A portable copy keeps `WeatherTool.ini` (settings, places, window state) and `cache\` (one CSV of monthly values per place, and its last forecast reply as `.forecast.json`) **beside the exe**.
+- A portable copy keeps `WeatherTool.ini` (settings, places, window state) and `cache\` (one CSV of monthly values per place, its last forecast reply as `.forecast.json`, and `tiles\` for the Map tab's map and radar tiles) **beside the exe**.
 - A copy under Program Files keeps them in **`%ProgramData%\WeatherTool`**.
 - `WEATHERTOOL_DIR` overrides both; the tests and test runs use it so they never touch a real configuration.
 
@@ -127,9 +138,12 @@ It refuses to run over an existing install or data folder, and cleans up after i
 | File | Role |
 |---|---|
 | `src/main.cpp` | Entry point: DPI awareness, GDI+ start/stop, creates `App`. |
-| `src/app.*` | Main window: list, tabs, buttons, menus, layout, header figures, the four History views and the Now tab, status line, update scheduling. |
+| `src/app.*` | Main window: list, tabs, buttons, menus, layout, header figures, the four History views, the Now and Map tabs, status line, update scheduling. |
 | `src/chart.*` | GDI+ renderers: the banded chart (bars and lines per year or month, legend, axes, hover tooltip) and the year-by-month heatmap. |
 | `src/forecast.*` | The forecast reply to a fixed-size `Forecast` (now, 48 hours, 16 days), weather-code names and symbols, and which hours and days are already past. |
+| `src/slippy.*` | Web Mercator tile arithmetic for the Map tab (written from the published OpenStreetMap formulas). |
+| `src/radar.*` | RainViewer's frame list and radar tile addresses. |
+| `src/tiles.*` | The map's tile store: a download thread, the disk cache, decoded bitmaps in memory, the radar request limit. |
 | `src/climate.*` | Archive reply to monthly grid, merging updates, the cache CSV, and the series and statistics (annual and seasonal series, month normals, trends, rolling means). |
 | `src/jsonscan.*` | A small non-recursive JSON scanner for the two Open-Meteo replies. |
 | `src/fetcher.*` | Worker thread with a bounded job queue; archive downloads and place searches; rate-limit handling. |

@@ -19,12 +19,17 @@ constexpr int kViewCount = 4;
 // Range presets: how many years the trend views show (0 = everything).
 constexpr std::array<int, 4> kRangeYears = { 0, 50, 30, 20 };
 
-enum class Tab : int { History = 0, Now = 1 };
-constexpr int kTabCount = 2;
+enum class Tab : int { History = 0, Now = 1, Map = 2 };
+constexpr int kTabCount = 3;
 
 struct ViewState {
     size_t selected  = 0;
     int    tab       = 0;     // Tab
+    bool   hasMap    = false; // the map has been looked at (else it centres on the selected place)
+    double mapLat    = 0.0;
+    double mapLon    = 0.0;
+    int    mapZoom   = 6;     // slippy::kMinZoom..kMaxZoom
+    bool   radar     = true;  // the radar overlay is on
     int    view      = 0;     // View
     int    month     = 0;     // 0..11, for View::Month
     int    measure   = 0;     // Var::Mean / High / Low

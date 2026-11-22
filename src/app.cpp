@@ -1,6 +1,7 @@
 #include "app.h"
 
 #include "resource.h"
+#include "slippy.h"
 #include "units.h"
 #include "updater.h"
 
@@ -28,6 +29,7 @@ constexpr wchar_t kClassName[] = L"WeatherToolMain";
 constexpr wchar_t kAppName[]   = L"WeatherTool";
 constexpr wchar_t kCredit[]    = L"Data: Open-Meteo.com, ERA5 reanalysis (CC BY 4.0)";
 constexpr wchar_t kCreditNow[] = L"Data: Open-Meteo.com forecast, national weather models (CC BY 4.0)";
+constexpr wchar_t kCreditMap[] = L"Map © OpenStreetMap contributors · Weather data by RainViewer";
 
 // Menu and control identifiers.
 enum : int {
@@ -37,9 +39,11 @@ enum : int {
     IDM_METRIC = 130, IDM_IMPERIAL,
     IDM_THEME_SYSTEM = 140, IDM_THEME_LIGHT, IDM_THEME_DARK,
     IDM_ABOUT = 150, IDM_CHECKUPDATE,
-    IDM_TAB0 = 160, IDM_TAB1, IDM_TABNEXT,             // + Tab
+    IDM_TAB0 = 160, IDM_TAB1, IDM_TABNEXT, IDM_TABMAP, // + Tab
+    IDM_DAYCLEAR = 170,                                // Esc: back to the next 48 hours
     IDC_LIST = 200, IDC_ADD, IDC_REMOVE, IDC_UPDATE, IDC_UNITS,
     IDC_VIEW0 = 210, IDC_RANGE0 = 220, IDC_MEASURE0 = 230, IDC_MONTH0 = 240, IDC_TAB0 = 250,
+    IDC_RADAR = 260, IDC_PREV, IDC_PLAY, IDC_NEXT, IDC_ZOOMOUT, IDC_ZOOMIN,
 };
 
 constexpr UINT_PTR kUpdateTimer   = 1;
@@ -56,7 +60,16 @@ constexpr size_t   kMaxForecastBytes = 256u * 1024u;
 // may still be exiting at start, so they are removed again a little later.
 constexpr UINT_PTR kCleanUpTimer   = 3;
 constexpr UINT     kCleanUpAfterMs = 15000;
-constexpr UINT     WM_APP_UPDATE   = WM_APP + 4;   // + 1..3 are the fetcher's
+constexpr UINT     WM_APP_UPDATE   = WM_APP + 4;   // + 1..3 are the fetcher's, + 5..6 the map's
+// Map tab: RainViewer adds a radar frame every 10 minutes; the animation
+// steps a frame at a time and holds on the latest.
+constexpr UINT_PTR kFramesTimer    = 4;
+constexpr UINT     kFramesEveryMs  = 5u * 60u * 1000u;
+constexpr int64_t  kFramesStale    = 9 * 60;
+constexpr UINT_PTR kAnimTimer      = 5;
+constexpr UINT     kAnimEveryMs    = 700;
+constexpr int      kAnimHoldTicks  = 3;
+constexpr int      kMapBtnW        = 62;
 
 // What Check for updates' worker threads hand back to the window.
 struct UpdateResult {
@@ -84,7 +97,7 @@ constexpr int kMinH     = 720;
 constexpr int kTabH     = 30;
 constexpr int kTabW     = 96;
 
-constexpr const wchar_t* kTabNames[kTabCount]   = { L"History", L"Now" };
+constexpr const wchar_t* kTabNames[kTabCount]   = { L"History", L"Now", L"Map" };
 constexpr const wchar_t* kViewNames[kViewCount] = { L"Trends", L"Month", L"Heatmap", L"Climate" };
 constexpr const wchar_t* kDayShort[7] = { L"Sun", L"Mon", L"Tue", L"Wed", L"Thu", L"Fri", L"Sat" };
 constexpr const wchar_t* kRangeNames[]          = { L"All years", L"50 years", L"30 years", L"20 years" };
@@ -306,6 +319,8 @@ bool App::Create(HINSTANCE hInst, int nCmdShow, std::wstring& err) {
     ScheduleForecasts(false);
     SetTimer(hwnd_, kUpdateTimer, kUpdateEveryMs, nullptr);
     SetTimer(hwnd_, kForecastTimer, kForecastEveryMs, nullptr);
+    SetTimer(hwnd_, kFramesTimer, kFramesEveryMs, nullptr);
+    if (MapTab()) { SetTab(cfg_.state.tab); }   // opened on the Map tab: fetch its frame list
     updater::CleanUp(IsInstalledCopy());   // what an update left, if anything
     SetTimer(hwnd_, kCleanUpTimer, kCleanUpAfterMs, nullptr);
     return true;
@@ -346,12 +361,29 @@ LRESULT App::Handle(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_COMMAND:     OnCommand(LOWORD(wp), HIWORD(wp)); return 0;
     case WM_MOUSEMOVE:   OnMouseMove(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)); return 0;
     case WM_MOUSELEAVE:  OnMouseLeave(); return 0;
+    case WM_LBUTTONDOWN: OnLButtonDown(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)); return 0;
+    case WM_LBUTTONUP:   OnLButtonUp(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)); return 0;
+    case WM_CAPTURECHANGED: dragging_ = false; return 0;
+    case WM_MOUSEWHEEL:  OnMouseWheel(GET_WHEEL_DELTA_WPARAM(wp), GET_X_LPARAM(lp), GET_Y_LPARAM(lp)); return 0;
+    case WM_APP_TILES:
+        tiles_.TakeDone();
+        if (MapTab()) { InvalidateRect(hwnd_, &mapRect_, FALSE); }
+        return 0;
+    case WM_APP_FRAMES:  OnFramesReady(); return 0;
+    case WM_SETCURSOR:
+        if (reinterpret_cast<HWND>(wp) == hwnd_ && LOWORD(lp) == HTCLIENT && OnSetCursor()) { return TRUE; }
+        return DefWindowProcW(hwnd_, WM_SETCURSOR, wp, lp);
     case WM_DPICHANGED:  OnDpiChanged(wp, lp); return 0;
     case WM_MEASUREITEM: OnMeasureItem(reinterpret_cast<MEASUREITEMSTRUCT*>(lp)); return TRUE;
     case WM_DRAWITEM:    OnDrawItem(reinterpret_cast<const DRAWITEMSTRUCT*>(lp)); return TRUE;
     case WM_TIMER:
         if (wp == kUpdateTimer) { ScheduleUpdates(false); }
         if (wp == kForecastTimer) { ScheduleForecasts(false); }
+        if (wp == kFramesTimer && MapTab() && tilesOk_) {
+            framesAsked_ = UnixNow();
+            tiles_.RequestFrames();
+        }
+        if (wp == kAnimTimer) { StepFrame(+1); }
         if (wp == kCleanUpTimer) {
             KillTimer(hwnd_, kCleanUpTimer);
             if (!updateBusy_.load()) { updater::CleanUp(IsInstalledCopy()); }
@@ -409,6 +441,7 @@ void App::OnCreate() {
     HMENU view = CreatePopupMenu();
     AppendMenuW(view, MF_STRING, IDM_TAB0, L"&History tab");
     AppendMenuW(view, MF_STRING, IDM_TAB1, L"&Now tab (current weather and forecast)");
+    AppendMenuW(view, MF_STRING, IDM_TABMAP, L"M&ap tab (radar)");
     AppendMenuW(view, MF_STRING, IDM_TABNEXT, L"Switch ta&b\tCtrl+Tab");
     AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
     for (int v = 0; v < kViewCount; ++v) {
@@ -443,6 +476,7 @@ void App::OnCreate() {
         { FVIRTKEY | FCONTROL, '3', IDM_VIEW0 + 2 },
         { FVIRTKEY | FCONTROL, '4', IDM_VIEW0 + 3 },
         { FVIRTKEY | FCONTROL, VK_TAB, IDM_TABNEXT },
+        { FVIRTKEY, VK_ESCAPE, IDM_DAYCLEAR },
     };
     hAccel_ = CreateAcceleratorTableW(acc, static_cast<int>(sizeof(acc) / sizeof(acc[0])));
 
@@ -456,6 +490,9 @@ void App::OnCreate() {
     webContent_.html = resource(IDR_WEBPAGE);
     webContent_.icon = resource(IDR_FAVICON);
     assert(!webContent_.html.empty());
+
+    std::wstring tileErr;
+    tilesOk_ = tiles_.Start(hwnd_, cfg_.cacheDir, tileErr);   // the Map tab says so if this failed
 
     ApplyTheme();
     RebuildList();
@@ -655,6 +692,12 @@ void App::CreateControls() {
     for (size_t r = 0; r < hRanges_.size(); ++r) { hRanges_[r] = button(kRangeNames[r], IDC_RANGE0 + static_cast<int>(r), true); }
     for (size_t m = 0; m < hMeasures_.size(); ++m) { hMeasures_[m] = button(kMeasureNames[m], IDC_MEASURE0 + static_cast<int>(m), true); }
     for (size_t m = 0; m < 12; ++m) { hMonths_[m] = button(kMonthShort[m], IDC_MONTH0 + static_cast<int>(m), true); }
+    hRadar_   = button(L"Radar", IDC_RADAR, true);
+    hPrev_    = button(L"◀", IDC_PREV, false);
+    hPlay_    = button(L"Play", IDC_PLAY, true);
+    hNext_    = button(L"▶", IDC_NEXT, false);
+    hZoomOut_ = button(L"−", IDC_ZOOMOUT, false);
+    hZoomIn_  = button(L"+", IDC_ZOOMIN, false);
 }
 
 void App::Layout() {
@@ -685,9 +728,25 @@ void App::Layout() {
     tabLine_ = { x0, m + Px(kTabH), r0, m + Px(kTabH) + 1 };
     const int row1 = tabLine_.bottom + Px(10);
 
+    // Map, row 1: radar on/off, frame back, play, frame forward; zoom at the right.
+    const bool map = MapTab();
+    const int mapShow = map ? SW_SHOW : SW_HIDE;
+    HWND mapLeft[] = { hRadar_, hPrev_, hPlay_, hNext_ };
+    int mx = x0;
+    for (HWND hb : mapLeft) {
+        ShowWindow(hb, mapShow);
+        const int bw2 = (hb == hPrev_ || hb == hNext_) ? Px(36) : Px(kMapBtnW);
+        MoveWindow(hb, mx, row1, bw2, bh, TRUE);
+        mx += bw2 + gap;
+    }
+    ShowWindow(hZoomOut_, mapShow);
+    ShowWindow(hZoomIn_, mapShow);
+    MoveWindow(hZoomIn_, r0 - Px(36), row1, Px(36), bh, TRUE);
+    MoveWindow(hZoomOut_, r0 - Px(72) - gap, row1, Px(36), bh, TRUE);
+
     // History, row 1: views (+ months in Month view). The Now tab has none
     // of these, so its header moves up into their place.
-    const bool history = !NowTab();
+    const bool history = !NowTab() && !map;
     const int show = history ? SW_SHOW : SW_HIDE;
     int x = x0;
     for (HWND hv : hViews_) {
@@ -726,6 +785,11 @@ void App::Layout() {
     const int mid = top + (bottom - top) / 2;
     topRect_    = { x0, top, r0, mid - Px(8) };
     bottomRect_ = { x0, mid + Px(8), r0, bottom };
+    mapRect_    = { 0, 0, 0, 0 };
+    if (map) {   // the map takes everything under its buttons; no header, no chart panels
+        mapRect_ = { x0, row1 + bh + Px(8), r0, bottom };
+        headerRect_ = topRect_ = bottomRect_ = RECT{ 0, 0, 0, 0 };
+    }
 }
 
 void App::SyncControls() {
@@ -739,6 +803,14 @@ void App::SyncControls() {
     for (size_t m = 0; m < hMeasures_.size(); ++m) { SetCheck(hMeasures_[m], static_cast<int>(m) == s.measure); }
     for (size_t m = 0; m < 12; ++m) { SetCheck(hMonths_[m], static_cast<int>(m) == s.month); }
     SetCheck(hUnits_, cfg_.units == Units::Imperial);
+    SetCheck(hRadar_, s.radar);
+    SetCheck(hPlay_, playing_);
+    const bool frames = s.radar && frames_.count > 1;
+    EnableWindow(hPrev_, frames);
+    EnableWindow(hPlay_, frames);
+    EnableWindow(hNext_, frames);
+    EnableWindow(hZoomOut_, s.mapZoom > slippy::kMinZoom);
+    EnableWindow(hZoomIn_, s.mapZoom < slippy::kMaxZoom);
     const bool any = cfg_.locCount > 0;
     EnableWindow(hRemove_, any);
     EnableWindow(hUpdate_, any);
@@ -748,6 +820,7 @@ void App::SyncControls() {
         };
         check(IDM_TAB0, s.tab == static_cast<int>(Tab::History));
         check(IDM_TAB1, s.tab == static_cast<int>(Tab::Now));
+        check(IDM_TABMAP, s.tab == static_cast<int>(Tab::Map));
         for (int v = 0; v < kViewCount; ++v) { check(IDM_VIEW0 + v, v == s.view && !NowTab()); }
         check(IDM_METRIC, cfg_.units == Units::Metric);
         check(IDM_IMPERIAL, cfg_.units == Units::Imperial);
@@ -776,6 +849,8 @@ void App::ApplyTheme() {
     for (HWND h : hRanges_) { SetWindowTheme(h, sub, nullptr); }
     for (HWND h : hMeasures_) { SetWindowTheme(h, sub, nullptr); }
     for (HWND h : hMonths_) { SetWindowTheme(h, sub, nullptr); }
+    HWND mapButtons[] = { hRadar_, hPrev_, hPlay_, hNext_, hZoomOut_, hZoomIn_ };
+    for (HWND h : mapButtons) { SetWindowTheme(h, sub, nullptr); }
     RedrawWindow(hwnd_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
 }
 
@@ -818,7 +893,7 @@ void App::LoadCaches() {
 }
 
 void App::ScheduleForecasts(bool force) {
-    if (!NowTab() && !force) { return; }   // only fetched while someone can see them
+    if (!NowTab() && !MapTab() && !force) { return; }   // only fetched while someone can see them (Now, Map markers)
     const int64_t now = UnixNow();
     for (size_t i = 0; i < cfg_.locCount; ++i) {
         const Forecast& f = (*forecasts_)[i];
@@ -849,6 +924,10 @@ void App::OnForecastReady() {
             continue;
         }
         assert(r.data != nullptr);
+        // A picked day is an index into the days: keep it only while day 0 is the same date.
+        const LocalTime& was = (*forecasts_)[idx].dTime[0];
+        const LocalTime& now = r.data->dTime[0];
+        if (idx == cfg_.state.selected && (was.year != now.year || was.month != now.month || was.day != now.day)) { dayPick_ = -1; }
         (*forecasts_)[idx] = *r.data;
         (*forecasts_)[idx].fetched = UnixNow();
         fcErrors_[idx].clear();
@@ -1032,7 +1111,9 @@ void App::OnMovePlace(int delta) {
 
 void App::SelectPlace(size_t index) {
     if (index >= cfg_.locCount) { return; }
+    if (index != cfg_.state.selected) { dayPick_ = -1; }   // a day of another place's forecast
     cfg_.state.selected = index;
+    if (MapTab()) { CenterMapOn(index); }
     SendMessageW(hList_, LB_SETCURSEL, index, 0);
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
@@ -1053,6 +1134,16 @@ void App::SetTab(int tab) {
     assert(tab >= 0 && tab < kTabCount);
     cfg_.state.tab = tab;
     hoverX_ = hoverY_ = -1;
+    dayPick_ = -1;
+    if (!MapTab()) {
+        SetPlaying(false);
+    } else {
+        if (!cfg_.state.hasMap && cfg_.state.selected < cfg_.locCount) { CenterMapOn(cfg_.state.selected); }
+        if (tilesOk_ && UnixNow() - framesAsked_ > kFramesStale) {
+            framesAsked_ = UnixNow();
+            tiles_.RequestFrames();
+        }
+    }
     SyncControls();
     Layout();
     ScheduleForecasts(false);
@@ -1098,7 +1189,29 @@ void App::OnCommand(int id, int code) {
     }
     if (id >= IDC_TAB0 && id < IDC_TAB0 + kTabCount) { SetTab(id - IDC_TAB0); return; }
     if (id == IDM_TAB0 || id == IDM_TAB1) { SetTab(id - IDM_TAB0); return; }
+    if (id == IDM_TABMAP) { SetTab(static_cast<int>(Tab::Map)); return; }
+    switch (id) {   // Map tab buttons
+    case IDC_RADAR:
+        cfg_.state.radar = !cfg_.state.radar;
+        if (!cfg_.state.radar) { SetPlaying(false); }
+        SyncControls();
+        InvalidateRect(hwnd_, &mapRect_, FALSE);
+        return;
+    case IDC_PREV:    SetPlaying(false); StepFrame(-1); return;
+    case IDC_NEXT:    SetPlaying(false); StepFrame(+1); return;
+    case IDC_PLAY:    SetPlaying(!playing_); return;
+    case IDC_ZOOMOUT: ZoomMap(-1, (mapRect_.left + mapRect_.right) / 2, (mapRect_.top + mapRect_.bottom) / 2); return;
+    case IDC_ZOOMIN:  ZoomMap(+1, (mapRect_.left + mapRect_.right) / 2, (mapRect_.top + mapRect_.bottom) / 2); return;
+    default: break;
+    }
     if (id == IDM_TABNEXT) { SetTab((cfg_.state.tab + 1) % kTabCount); return; }
+    if (id == IDM_DAYCLEAR) {
+        if (dayPick_ >= 0) {
+            dayPick_ = -1;
+            InvalidateRect(hwnd_, nullptr, FALSE);
+        }
+        return;
+    }
     if (id >= IDC_VIEW0 && id < IDC_VIEW0 + kViewCount) { SetView(id - IDC_VIEW0); return; }
     if (id >= IDM_VIEW0 && id < IDM_VIEW0 + kViewCount) { SetView(id - IDM_VIEW0); return; }
     if (id >= IDC_RANGE0 && id < IDC_RANGE0 + static_cast<int>(kRangeYears.size())) {
@@ -1176,6 +1289,8 @@ void App::OnCommand(int id, int code) {
             L"\n\nHistorical temperature and snowfall for the places you choose, and their weather now.\n\n"
             L"Weather data by Open-Meteo.com, licensed CC BY 4.0. History: ERA5 and ERA5-Land reanalysis from the "
             L"Copernicus Climate Change Service. Now: Open-Meteo's forecast from national weather services' models. "
+            L"Map: © OpenStreetMap contributors (openstreetmap.org/copyright); radar: weather data by RainViewer "
+            L"(rainviewer.com). "
             L"Values describe a model grid cell, not a weather station; snowfall in particular can differ from a "
             L"local gauge.\n\nData folder:\n" + cfg_.dir +
             L"\n\nWeb server: " + (web_.Running() ? WebUrls() : std::wstring(L"off (File > Web server)"));
@@ -1200,6 +1315,7 @@ void App::OnClose() {
     }
     ShowWindow(hwnd_, SW_HIDE);   // a download in flight may take a moment to finish
     StopUpdateThread();
+    tiles_.Stop();
     web_.Stop();
     fetcher_.Stop();
     DestroyWindow(hwnd_);
@@ -1217,6 +1333,13 @@ void App::OnMouseMove(int x, int y) {
         tracking_ = TrackMouseEvent(&tme) != 0;
     }
     const POINT p{ x, y };
+    if (dragging_) {
+        const int tx = x - dragStart_.x, ty = y - dragStart_.y;
+        if (!dragMoved_ && tx * tx + ty * ty > Px(4) * Px(4)) { dragMoved_ = true; }
+        if (dragMoved_) { PanMap(x - dragLast_.x, y - dragLast_.y); }
+        dragLast_ = p;
+        return;
+    }
     const bool inPanels = PtInRect(&topRect_, p) || PtInRect(&bottomRect_, p);
     const bool wasIn = hoverX_ >= 0;
     if (!inPanels && !wasIn) { return; }
@@ -1224,6 +1347,61 @@ void App::OnMouseMove(int x, int y) {
     hoverY_ = inPanels ? y : -1;
     InvalidateRect(hwnd_, &topRect_, FALSE);
     InvalidateRect(hwnd_, &bottomRect_, FALSE);
+}
+
+int App::DaySlotAt(int x, int y) const {
+    const size_t i = cfg_.state.selected;
+    const POINT p{ x, y };
+    if (!NowTab() || !HasForecast(i) || !PtInRect(&bottomRect_, p)) { return -1; }
+    const Forecast& f = (*forecasts_)[i];
+    const size_t d0 = FirstDayFrom(f, UnixNow());
+    const int slot = BandChartSlotAt(ToRectF(bottomRect_), f.days - d0, static_cast<float>(x), scale_);
+    return slot < 0 ? -1 : static_cast<int>(d0) + slot;
+}
+
+// Now tab: a click on a day of the 16-day chart shows that day hour by hour
+// above; a click on the same day goes back to the next 48 hours.
+void App::OnLButtonDown(int x, int y) {
+    const POINT p{ x, y };
+    if (MapTab() && PtInRect(&mapRect_, p)) {   // the start of a drag, or a click on a marker
+        dragging_ = true;
+        dragMoved_ = false;
+        dragStart_ = dragLast_ = p;
+        SetCapture(hwnd_);
+        return;
+    }
+    const int day = DaySlotAt(x, y);
+    if (day < 0) { return; }
+    dayPick_ = day == dayPick_ ? -1 : day;
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void App::OnLButtonUp(int x, int y) {
+    if (!dragging_) { return; }
+    dragging_ = false;
+    ReleaseCapture();
+    if (!dragMoved_) {   // a click: on a marker, that place
+        const int i = MarkerAt(x, y);
+        if (i >= 0) { SelectPlace(static_cast<size_t>(i)); }
+    }
+}
+
+void App::OnMouseWheel(int delta, int screenX, int screenY) {
+    POINT p{ screenX, screenY };
+    if (!MapTab() || !ScreenToClient(hwnd_, &p) || !PtInRect(&mapRect_, p)) { return; }
+    ZoomMap(delta > 0 ? +1 : -1, p.x, p.y);
+}
+
+bool App::OnSetCursor() {
+    POINT p{};
+    if (!GetCursorPos(&p) || !ScreenToClient(hwnd_, &p)) { return false; }
+    if (MapTab() && PtInRect(&mapRect_, p)) {
+        SetCursor(LoadCursorW(nullptr, dragging_ ? IDC_SIZEALL : MarkerAt(p.x, p.y) >= 0 ? IDC_HAND : IDC_ARROW));
+        return true;
+    }
+    if (DaySlotAt(p.x, p.y) < 0) { return false; }
+    SetCursor(LoadCursorW(nullptr, IDC_HAND));
+    return true;
 }
 
 void App::OnMouseLeave() {
@@ -1245,6 +1423,8 @@ void App::OnDpiChanged(WPARAM wp, LPARAM lp) {
     for (HWND h : hRanges_) { setFont(h); }
     for (HWND h : hMeasures_) { setFont(h); }
     for (HWND h : hMonths_) { setFont(h); }
+    HWND mapButtons[] = { hRadar_, hPrev_, hPlay_, hNext_, hZoomOut_, hZoomIn_ };
+    for (HWND h : mapButtons) { setFont(h); }
     SendMessageW(hList_, LB_SETITEMHEIGHT, 0, Px(kItemH));
     const RECT* r = reinterpret_cast<const RECT*>(lp);
     SetWindowPos(hwnd_, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -1281,7 +1461,7 @@ void App::OnDrawItem(const DRAWITEMSTRUCT* dis) {
     const float pad = 10.0f * s;
     const Font fName = UiFont(9.5f, s, FontStyleBold);
     DrawTextClip(g, cfg_.locs[i].name, fName, theme_->text, RectF(r.X + pad, r.Y + 5.0f * s, r.Width - 2 * pad, 20.0f * s));
-    if (NowTab()) {
+    if (NowTab() || MapTab()) {   // the weather now on both
         DrawListRowNow(g, r, i);
     } else {
         DrawListRow(g, r, i);
@@ -1415,7 +1595,9 @@ void App::OnPaint() {
             SolidBrush bg(theme_->bg);
             g.FillRectangle(&bg, 0, 0, rc.right, rc.bottom);
             PaintTabLine(g);
-            if (NowTab()) {
+            if (MapTab()) {
+                PaintMap(g);
+            } else if (NowTab()) {
                 PaintNowHeader(g);
                 PaintNow(g);
             } else {
@@ -1799,10 +1981,14 @@ void App::PaintNow(Graphics& g) {
 // The next 48 hours: temperature and feels-like, with precipitation in the tooltip.
 void App::PaintHours(Graphics& g, const Forecast& f) {
     const Units u = cfg_.units;
-    const size_t h0 = FirstHourFrom(f, UnixNow());
-    const size_t n = f.hours - h0;
-    std::array<double, kForecastHours> temp{}, feels{}, prob{}, rain{}, snow{};
-    std::array<std::wstring, kForecastHours> heads{}, ticks{};
+    // The next 48 hours, or every hour of the day picked in the 16-day chart.
+    size_t h0 = FirstHourFrom(f, UnixNow());
+    size_t n = std::min(f.hours - h0, kNextHours);
+    const bool oneDay = dayPick_ >= 0 && static_cast<size_t>(dayPick_) < f.days;
+    if (oneDay) { HoursOfDay(f, static_cast<size_t>(dayPick_), h0, n); }
+    assert(h0 + n <= f.hours && n <= kNextHours);
+    std::array<double, kNextHours> temp{}, feels{}, prob{}, rain{}, snow{}, wind{}, gust{}, cloud{};
+    std::array<std::wstring, kNextHours> heads{}, ticks{};
     for (size_t k = 0; k < n; ++k) {
         const size_t j = h0 + k;
         const LocalTime& t = f.hTime[j];
@@ -1811,13 +1997,27 @@ void App::PaintHours(Graphics& g, const Forecast& f) {
         prob[k]  = f.hProb[j];
         rain[k]  = ToRain(f.hPrecip[j], u);
         snow[k]  = ToSnow(f.hSnow[j], u);
+        wind[k]  = ToWind(f.hWind[j], u);
+        gust[k]  = ToWind(f.hGust[j], u);
+        cloud[k] = f.hCloud[j];
         const std::wstring what = WeatherText(f.hCode[j]);
         heads[k] = DayLabel(t) + L" " + HourLabel(t) + (what.empty() ? L"" : L" · " + what);
-        if (t.hour % 6 == 0) { ticks[k] = t.hour == 0 ? std::wstring(kDayShort[Weekday(t.year, t.month, t.day)]) : HourLabel(t); }
+        if (oneDay) {
+            if (t.hour % 3 == 0) { ticks[k] = HourLabel(t); }
+        } else if (t.hour % 6 == 0) {
+            ticks[k] = t.hour == 0 ? std::wstring(kDayShort[Weekday(t.year, t.month, t.day)]) : HourLabel(t);
+        }
     }
     BandChartInput in;
-    in.title = L"Next 48 hours";
-    in.subtitle = L"hourly, local time there" + (f.tzAbbrev.empty() ? std::wstring() : L" (" + f.tzAbbrev + L")");
+    const std::wstring tz = f.tzAbbrev.empty() ? std::wstring() : L" (" + f.tzAbbrev + L")";
+    if (oneDay) {
+        const LocalTime& d = f.dTime[static_cast<size_t>(dayPick_)];
+        in.title = DayLabel(d) + L" " + kMonthShort[d.month - 1] + L", hour by hour";
+        in.subtitle = L"local time there" + tz + L" · click the day again, or press Esc, for the next 48 hours";
+    } else {
+        in.title = L"Next 48 hours";
+        in.subtitle = L"hourly, local time there" + tz + L" · click a day below to see its hours";
+    }
     in.axis = XAxis::Custom;
     in.n = n;
     in.heads = heads.data();
@@ -1833,7 +2033,10 @@ void App::PaintHours(Graphics& g, const Forecast& f) {
     in.series[2] = { prob.data(), theme_->text, 0.0f, false, false, true, L"Chance of precipitation", true, L"%", 0 };
     in.series[3] = { rain.data(), theme_->text, 0.0f, false, false, true, L"Precipitation", true, RainUnit(u), RainDecimals(u) };
     in.series[4] = { snow.data(), theme_->text, 0.0f, false, false, true, L"Snowfall", true, SnowUnit(u), SnowDecimals(u) + 1 };
-    in.seriesCount = 5;
+    in.series[5] = { wind.data(), theme_->text, 0.0f, false, false, true, L"Wind", true, WindUnit(u), 0 };
+    in.series[6] = { gust.data(), theme_->text, 0.0f, false, false, true, L"Gusts", true, WindUnit(u), 0 };
+    in.series[7] = { cloud.data(), theme_->text, 0.0f, false, false, true, L"Cloud cover", true, L"%", 0 };
+    in.seriesCount = 8;
     DrawBandChart(g, ToRectF(topRect_), in, scale_);
 }
 
@@ -1886,7 +2089,9 @@ void App::PaintDays(Graphics& g, const Forecast& f, size_t index) {
     in.heads = heads.data();
     in.ticks = ticks.data();
     in.ticks2 = ticks2.data();
-    in.highlight = n > 0 ? 0 : -1;
+    // Shaded: the day picked for the chart above, else today.
+    const bool picked = dayPick_ >= static_cast<int>(d0) && static_cast<size_t>(dayPick_) < f.days;
+    in.highlight = picked ? dayPick_ - static_cast<int>(d0) : (n > 0 ? 0 : -1);
     in.unit = TempUnit(u);
     in.decimals = 1;
     in.theme = theme_;
@@ -1908,10 +2113,301 @@ void App::PaintDays(Graphics& g, const Forecast& f, size_t index) {
     DrawBandChart(g, ToRectF(bottomRect_), in, scale_);
 }
 
+// ---------------------------------------------------------------------------
+// The Map tab: OpenStreetMap tiles, RainViewer radar, the places as markers.
+
+void App::CenterMapOn(size_t index) {
+    if (index >= cfg_.locCount) { return; }
+    cfg_.state.mapLat = std::fmax(-80.0, std::fmin(80.0, cfg_.locs[index].lat));
+    cfg_.state.mapLon = cfg_.locs[index].lon;
+    cfg_.state.hasMap = true;
+    InvalidateRect(hwnd_, &mapRect_, FALSE);
+}
+
+void App::PanMap(int dx, int dy) {
+    const int z = cfg_.state.mapZoom;
+    const double world = slippy::WorldSize(z);
+    double cx = slippy::LonToX(cfg_.state.mapLon, z) - dx / scale_;
+    const double cy = std::fmax(0.0, std::fmin(world, slippy::LatToY(cfg_.state.mapLat, z) - dy / scale_));
+    cx = std::fmod(std::fmod(cx, world) + world, world);   // the world repeats east-west
+    cfg_.state.mapLon = slippy::XToLon(cx, z);
+    cfg_.state.mapLat = slippy::YToLat(cy, z);
+    cfg_.state.hasMap = true;
+    InvalidateRect(hwnd_, &mapRect_, FALSE);
+}
+
+// Zoom by `steps` keeping the point under (x, y) where it is.
+void App::ZoomMap(int steps, int x, int y) {
+    const int z0 = cfg_.state.mapZoom;
+    const int z1 = std::max(slippy::kMinZoom, std::min(slippy::kMaxZoom, z0 + steps));
+    if (z1 == z0) { return; }
+    const double dx = (x - (mapRect_.left + mapRect_.right) / 2.0) / scale_;
+    const double dy = (y - (mapRect_.top + mapRect_.bottom) / 2.0) / scale_;
+    const double lon = slippy::XToLon(slippy::LonToX(cfg_.state.mapLon, z0) + dx, z0);
+    const double lat = slippy::YToLat(slippy::LatToY(cfg_.state.mapLat, z0) + dy, z0);
+    cfg_.state.mapZoom = z1;
+    cfg_.state.mapLon = slippy::XToLon(slippy::LonToX(lon, z1) - dx, z1);
+    cfg_.state.mapLat = slippy::YToLat(slippy::LatToY(lat, z1) - dy, z1);
+    if (cfg_.state.mapLon < -180.0) { cfg_.state.mapLon += 360.0; }
+    if (cfg_.state.mapLon >= 180.0) { cfg_.state.mapLon -= 360.0; }
+    cfg_.state.hasMap = true;
+    SyncControls();
+    InvalidateRect(hwnd_, &mapRect_, FALSE);
+}
+
+void App::OnFramesReady() {
+    radar::Frames f;
+    std::wstring err;
+    if (!tiles_.TakeFrames(f, err)) {
+        if (!err.empty()) {
+            framesError_ = err;
+            SetStatus(L"Radar: " + err);
+        }
+    } else {
+        const bool atLatest = frames_.count == 0 || frame_ + 1 >= frames_.count;
+        frames_ = f;
+        framesError_.clear();
+        if (!playing_ || atLatest || frame_ >= frames_.count) { frame_ = frames_.count - 1; }
+    }
+    SyncControls();
+    InvalidateRect(hwnd_, &mapRect_, FALSE);
+}
+
+void App::StepFrame(int delta) {
+    const size_t n = frames_.count;
+    if (n == 0) { return; }
+    if (playing_ && delta > 0 && frame_ + 1 == n) {   // hold on the latest frame for a moment
+        if (++holdTicks_ < kAnimHoldTicks) { return; }
+        holdTicks_ = 0;
+        frame_ = 0;
+    } else {
+        assert(delta == 1 || delta == -1);
+        frame_ = static_cast<size_t>(static_cast<int>(frame_) + static_cast<int>(n) + delta) % n;
+    }
+    InvalidateRect(hwnd_, &mapRect_, FALSE);
+}
+
+void App::SetPlaying(bool on) {
+    if (on && (frames_.count < 2 || !cfg_.state.radar)) { on = false; }
+    playing_ = on;
+    holdTicks_ = 0;
+    if (on) {
+        SetTimer(hwnd_, kAnimTimer, kAnimEveryMs, nullptr);
+    } else {
+        KillTimer(hwnd_, kAnimTimer);
+    }
+    SyncControls();
+}
+
+int App::MarkerAt(int x, int y) const {
+    const POINT p{ x, y };
+    for (size_t k = 0; k < markerCount_; ++k) {
+        if (PtInRect(&markers_[k].hit, p)) { return static_cast<int>(markers_[k].index); }
+    }
+    return -1;
+}
+
+void App::PaintMap(Graphics& g) {
+    const RectF r = ToRectF(mapRect_);
+    markerCount_ = 0;
+    if (r.Width < 20.0f || r.Height < 20.0f) { return; }
+    SolidBrush bg(theme_->listBg);
+    g.FillRectangle(&bg, r);
+    if (!tilesOk_) {
+        PaintText(g, L"The map could not start its download thread.", UiFont(11.0f, scale_), theme_->textMuted,
+                  r.X + 20.0f * scale_, r.Y + 20.0f * scale_);
+        return;
+    }
+    const int z = cfg_.state.mapZoom;
+    const float s = scale_;
+    const double T = slippy::kTile * static_cast<double>(s);   // a map tile on screen
+    const double cx = slippy::LonToX(cfg_.state.mapLon, z);
+    const double cy = slippy::LatToY(cfg_.state.mapLat, z);
+    const double ox = r.X + r.Width / 2.0 - cx * s;   // screen = o + map px * scale
+    const double oy = r.Y + r.Height / 2.0 - cy * s;
+    const int n = 1 << z;
+    g.SetClip(r);
+    g.SetInterpolationMode(InterpolationModeBilinear);
+    g.SetPixelOffsetMode(PixelOffsetModeHalf);
+    tiles_.NewFrame();
+
+    // The base map; in the dark theme dimmed so it sits with the rest of the window.
+    ImageAttributes dim;
+    if (theme_->dark) {
+        ColorMatrix cm = { { { 0.55f, 0, 0, 0, 0 }, { 0, 0.55f, 0, 0, 0 }, { 0, 0, 0.6f, 0, 0 }, { 0, 0, 0, 1, 0 }, { 0, 0, 0, 0, 1 } } };
+        dim.SetColorMatrix(&cm);
+    }
+    const int tx0 = static_cast<int>(std::floor((r.X - ox) / T));
+    const int tx1 = static_cast<int>(std::floor((r.X + r.Width - ox) / T));
+    const int ty0 = std::max(0, static_cast<int>(std::floor((r.Y - oy) / T)));
+    const int ty1 = std::min(n - 1, static_cast<int>(std::floor((r.Y + r.Height - oy) / T)));
+    for (int ty = ty0; ty <= ty1 && ty - ty0 < 32; ++ty) {
+        for (int tx = tx0; tx <= tx1 && tx - tx0 < 32; ++tx) {
+            const int wx = slippy::WrapTile(tx, z);
+            const RectF dest(static_cast<REAL>(ox + tx * T), static_cast<REAL>(oy + ty * T),
+                             static_cast<REAL>(T) + 0.5f, static_cast<REAL>(T) + 0.5f);
+            const std::wstring key = L"osm_" + std::to_wstring(z) + L"_" + std::to_wstring(wx) + L"_" + std::to_wstring(ty);
+            Bitmap* b = tiles_.Get(key, slippy::OsmTileUrl(z, wx, ty), false);
+            for (int k = 1; b == nullptr && k <= 3 && z - k >= 0; ++k) {   // meanwhile, a coarser tile scaled up
+                const slippy::Parent p = slippy::ParentOf(z, wx, ty, z - k);
+                Bitmap* pb = tiles_.Peek(L"osm_" + std::to_wstring(z - k) + L"_" + std::to_wstring(p.x) + L"_" + std::to_wstring(p.y));
+                if (pb != nullptr) {
+                    const REAL w = static_cast<REAL>(pb->GetWidth());
+                    g.DrawImage(pb, dest, static_cast<REAL>(p.u0 * w), static_cast<REAL>(p.v0 * w),
+                                static_cast<REAL>(p.du * w), static_cast<REAL>(p.du * w), UnitPixel, &dim);
+                    break;
+                }
+            }
+            if (b != nullptr) {
+                g.DrawImage(b, dest, 0, 0, static_cast<REAL>(b->GetWidth()), static_cast<REAL>(b->GetHeight()), UnitPixel, &dim);
+            }
+        }
+    }
+
+    // Radar: one 512 px RainViewer tile at zoom zr covers 2^(z-zr) map tiles each way.
+    if (cfg_.state.radar && frames_.count > 0) {
+        const int zr = std::min(z - 1, radar::kMaxZoom);
+        const double RT = T * static_cast<double>(1 << (z - zr));
+        const int nr = 1 << zr;
+        ImageAttributes see;
+        ColorMatrix am = { { { 1, 0, 0, 0, 0 }, { 0, 1, 0, 0, 0 }, { 0, 0, 1, 0, 0 }, { 0, 0, 0, 0.8f, 0 }, { 0, 0, 0, 0, 1 } } };
+        see.SetColorMatrix(&am);
+        const int rx0 = static_cast<int>(std::floor((r.X - ox) / RT));
+        const int rx1 = static_cast<int>(std::floor((r.X + r.Width - ox) / RT));
+        const int ry0 = std::max(0, static_cast<int>(std::floor((r.Y - oy) / RT)));
+        const int ry1 = std::min(nr - 1, static_cast<int>(std::floor((r.Y + r.Height - oy) / RT)));
+        const size_t next = (frame_ + 1) % frames_.count;
+        const size_t prev = (frame_ + frames_.count - 1) % frames_.count;
+        auto key = [&](size_t f, int x, int y) {
+            return L"radar_" + std::to_wstring(frames_.frame[f].time) + L"_" + std::to_wstring(zr) + L"_" +
+                   std::to_wstring(x) + L"_" + std::to_wstring(y);
+        };
+        for (int ty = ry0; ty <= ry1 && ty - ry0 < 16; ++ty) {
+            for (int tx = rx0; tx <= rx1 && tx - rx0 < 16; ++tx) {
+                const int wx = slippy::WrapTile(tx, zr);
+                Bitmap* b = tiles_.Get(key(frame_, wx, ty), radar::TileUrl(frames_, frame_, zr, wx, ty), true);
+                if (b == nullptr) { b = tiles_.Peek(key(prev, wx, ty)); }   // still loading: the frame before
+                if (playing_) { (void)tiles_.Get(key(next, wx, ty), radar::TileUrl(frames_, next, zr, wx, ty), true); }
+                if (b == nullptr) { continue; }
+                const RectF dest(static_cast<REAL>(ox + tx * RT), static_cast<REAL>(oy + ty * RT),
+                                 static_cast<REAL>(RT), static_cast<REAL>(RT));
+                g.DrawImage(b, dest, 0, 0, static_cast<REAL>(b->GetWidth()), static_cast<REAL>(b->GetHeight()), UnitPixel, &see);
+            }
+        }
+    }
+    PaintMarkers(g, r, ox, oy);
+    g.ResetClip();
+    g.SetPixelOffsetMode(PixelOffsetModeDefault);
+    PaintMapOverlays(g, r);
+}
+
+// Each place as a dot with its name and, when its forecast is here, its temperature now.
+void App::PaintMarkers(Graphics& g, const RectF& r, double ox, double oy) {
+    const int z = cfg_.state.mapZoom;
+    const float s = scale_;
+    const double world = slippy::WorldSize(z) * s;
+    const Font f = UiFont(8.5f, s, FontStyleBold);
+    const double mid = r.X + r.Width / 2.0;
+    for (size_t i = 0; i < cfg_.locCount; ++i) {
+        double x = ox + slippy::LonToX(cfg_.locs[i].lon, z) * s;
+        x += std::round((mid - x) / world) * world;   // the copy of the world nearest the centre
+        const double y = oy + slippy::LatToY(cfg_.locs[i].lat, z) * s;
+        if (x < r.X - 200 || x > r.X + r.Width + 50 || y < r.Y - 30 || y > r.Y + r.Height + 30) { continue; }
+        const std::wstring& name = cfg_.locs[i].name;
+        std::wstring label = name.substr(0, name.find(L','));
+        if (HasForecast(i)) { label += L"  " + FmtTemp((*forecasts_)[i].temp, cfg_.units); }
+        const bool sel = i == cfg_.state.selected;
+        const REAL rad = (sel ? 6.0f : 5.0f) * s;
+        const REAL px = static_cast<REAL>(x), py = static_cast<REAL>(y);
+        SolidBrush dot(sel ? theme_->series2 : theme_->series1);
+        Pen ring(theme_->bg, 2.0f * s);
+        g.FillEllipse(&dot, px - rad, py - rad, 2 * rad, 2 * rad);
+        g.DrawEllipse(&ring, px - rad, py - rad, 2 * rad, 2 * rad);
+        const REAL tw = TextW(g, label, f);
+        const REAL th = FontPx(8.5f, s) * 1.45f;
+        const RectF box(px + rad + 4.0f * s, py - th / 2.0f, tw + 8.0f * s, th);
+        SolidBrush back(theme_->tipBg);
+        Pen edge(theme_->tipBorder, 1.0f);
+        g.FillRectangle(&back, box);
+        g.DrawRectangle(&edge, box);
+        PaintText(g, label, f, theme_->tipText, box.X + 4.0f * s, box.Y + 1.0f * s);
+        if (markerCount_ < markers_.size()) {
+            markers_[markerCount_++] = { RECT{ static_cast<LONG>(px - rad - 3), static_cast<LONG>(py - th / 2 - 2),
+                                               static_cast<LONG>(box.X + box.Width + 2), static_cast<LONG>(py + th / 2 + 2) }, i };
+        }
+    }
+}
+
+// The frame's time, the radar legend and the credits the two services ask for.
+void App::PaintMapOverlays(Graphics& g, const RectF& r) {
+    const float s = scale_;
+    const Font f = UiFont(8.5f, s);
+    const Font fb = UiFont(9.0f, s, FontStyleBold);
+    SolidBrush back(theme_->tipBg);
+    Pen edge(theme_->tipBorder, 1.0f);
+    auto box = [&](const std::wstring& t, const Font& font, REAL x, REAL y, bool right) {
+        const REAL w = TextW(g, t, font) + 10.0f * s;
+        const REAL h = font.GetSize() * 1.5f;   // UnitPixel fonts: the size is in pixels
+        const RectF b(right ? x - w : x, y, w, h);
+        g.FillRectangle(&back, b);
+        g.DrawRectangle(&edge, b);
+        PaintText(g, t, font, theme_->tipText, b.X + 5.0f * s, b.Y + 2.0f * s);
+        return b;
+    };
+    // Top left: which radar picture this is.
+    std::wstring t;
+    if (!cfg_.state.radar) {
+        t = L"Radar off";
+    } else if (frames_.count == 0) {
+        t = framesError_.empty() ? L"Loading radar…" : L"Radar unavailable: " + framesError_;
+    } else {
+        tm l{};
+        const __time64_t ft = frames_.frame[frame_].time;
+        _localtime64_s(&l, &ft);
+        std::array<wchar_t, 64> b{};
+        swprintf_s(b.data(), b.size(), L"Radar %02d:%02d", l.tm_hour, l.tm_min);
+        t = b.data();
+        t += frame_ + 1 == frames_.count ? L" (latest)"
+                                         : L"  (" + std::to_wstring(frame_ + 1) + L" of " + std::to_wstring(frames_.count) + L")";
+        if (cfg_.state.mapZoom - 1 > radar::kMaxZoom) { t += L" · coarser than the map at this zoom"; }
+    }
+    box(t, fb, r.X + 8.0f * s, r.Y + 8.0f * s, false);
+
+    // Bottom right: the credits (OpenStreetMap and RainViewer both require them on the map).
+    const std::wstring credit = L"© OpenStreetMap contributors" + std::wstring(cfg_.state.radar ? L" · Weather data by RainViewer" : L"");
+    box(credit, f, r.X + r.Width - 4.0f * s, r.Y + r.Height - 22.0f * s, true);
+
+    // Bottom left: what the radar colours mean (RainViewer's "Universal Blue" scheme).
+    if (!cfg_.state.radar) { return; }
+    static const ARGB kRain[] = { 0xFF36BAE5, 0xFF0077AA, 0xFF004768, 0xFFFFC500, 0xFFFF4400, 0xFFC10000, 0xFFFF77FF };
+    static const ARGB kSnow[] = { 0xFFC4FFFF, 0xFF7FBFFF, 0xFF2F6FFF, 0xFF0022FF };
+    const REAL sw = 16.0f * s, sh = 10.0f * s;
+    const REAL lw = 46.0f * s + TextW(g, L"light", f) + sw * 7.0f + TextW(g, L"very heavy", f) + 14.0f * s;
+    const REAL lh = 44.0f * s;
+    const RectF lb(r.X + 8.0f * s, r.Y + r.Height - lh - 8.0f * s, lw, lh);
+    g.FillRectangle(&back, lb);
+    g.DrawRectangle(&edge, lb);
+    auto ramp = [&](const ARGB* c, size_t n, REAL y, const wchar_t* name, const wchar_t* lo, const wchar_t* hi) {
+        REAL x = lb.X + 6.0f * s;
+        PaintText(g, name, f, theme_->tipText, x, y - 3.0f * s);
+        x += 40.0f * s;
+        PaintText(g, lo, f, theme_->tipText, x, y - 3.0f * s);
+        x += TextW(g, lo, f) + 2.0f * s;
+        for (size_t k = 0; k < n; ++k) {
+            SolidBrush b{ Color(c[k]) };
+            g.FillRectangle(&b, x, y, sw, sh);
+            x += sw;
+        }
+        PaintText(g, hi, f, theme_->tipText, x + 3.0f * s, y - 3.0f * s);
+    };
+    ramp(kRain, sizeof(kRain) / sizeof(kRain[0]), lb.Y + 8.0f * s, L"Rain", L"light", L"very heavy");
+    ramp(kSnow, sizeof(kSnow) / sizeof(kSnow[0]), lb.Y + 26.0f * s, L"Snow", L"light", L"heavy");
+}
+
 void App::PaintStatus(Graphics& g) {
     const RectF r = ToRectF(statusRect_);
     const Font f = UiFont(8.5f, scale_);
-    const wchar_t* credit = NowTab() ? kCreditNow : kCredit;
+    const wchar_t* credit = MapTab() ? kCreditMap : NowTab() ? kCreditNow : kCredit;
     const float cw = TextW(g, credit, f);
     PaintText(g, credit, f, theme_->textMuted, r.X + r.Width - cw, r.Y + 2.0f * scale_);
     DrawTextClip(g, status_, f, theme_->textSecondary, RectF(r.X, r.Y + 2.0f * scale_, r.Width - cw - 16.0f * scale_, r.Height));

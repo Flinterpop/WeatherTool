@@ -35,7 +35,13 @@ public:
     bool Post(const std::wstring& url, const std::wstring& contentType, const std::wstring& extraHeaders,
               const std::string& body, char* buf, size_t cap, HttpResult& out, std::wstring& err);
 
+    // Sends exactly "WeatherTool/<version> (+repository URL)" as the
+    // User-Agent instead of the browser-like default. OpenStreetMap's tile
+    // policy requires a distinct, honest one and blocks browser imitations.
+    void UseAppIdentity() { appIdentity_ = true; }
+
 private:
+    bool appIdentity_ = false;
     bool Request(const wchar_t* method, const std::wstring& url, const std::wstring& extraHeaders,
                  const std::string& body, char* buf, size_t cap, HttpResult& out, std::wstring& err);
     bool EnsureSession(std::wstring& err);

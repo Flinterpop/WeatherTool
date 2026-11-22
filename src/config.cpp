@@ -173,6 +173,19 @@ bool LoadConfig(const std::wstring& dir, Config& cfg, std::wstring& err) {
     ViewState& s = cfg.state;
     s.selected = static_cast<size_t>(Clamp(ReadInt(cfg, L"state", L"selected", 0), 0, kMaxLocations - 1));
     s.tab      = Clamp(ReadInt(cfg, L"state", L"tab", 0), 0, kTabCount - 1);
+    s.mapZoom  = Clamp(ReadInt(cfg, L"state", L"mapZoom", 6), 3, 12);
+    s.radar    = ReadInt(cfg, L"state", L"radar", 1) != 0;
+    const std::wstring mlat = ReadStr(cfg, L"state", L"mapLat", L"");
+    const std::wstring mlon = ReadStr(cfg, L"state", L"mapLon", L"");
+    if (!mlat.empty() && !mlon.empty()) {
+        const double la = std::wcstod(mlat.c_str(), nullptr);
+        const double lo = std::wcstod(mlon.c_str(), nullptr);
+        if (std::fabs(la) <= 85.0 && std::fabs(lo) <= 180.0) {
+            s.hasMap = true;
+            s.mapLat = la;
+            s.mapLon = lo;
+        }
+    }
     s.view     = Clamp(ReadInt(cfg, L"state", L"view", 0), 0, kViewCount - 1);
     s.month    = Clamp(ReadInt(cfg, L"state", L"month", 0), 0, 11);
     s.measure  = Clamp(ReadInt(cfg, L"state", L"measure", 0), 0, 2);
@@ -224,7 +237,15 @@ bool SaveState(const Config& cfg, std::wstring& err) {
               WriteStr(cfg, L"state", L"month", std::to_wstring(s.month), err) &&
               WriteStr(cfg, L"state", L"measure", std::to_wstring(s.measure), err) &&
               WriteStr(cfg, L"state", L"range", std::to_wstring(s.range), err) &&
-              WriteStr(cfg, L"state", L"maximized", s.maximized ? L"1" : L"0", err);
+              WriteStr(cfg, L"state", L"maximized", s.maximized ? L"1" : L"0", err) &&
+              WriteStr(cfg, L"state", L"mapZoom", std::to_wstring(s.mapZoom), err) &&
+              WriteStr(cfg, L"state", L"radar", s.radar ? L"1" : L"0", err);
+    if (ok && s.hasMap) {
+        std::array<wchar_t, 32> la{}, lo{};
+        swprintf_s(la.data(), la.size(), L"%.5f", s.mapLat);
+        swprintf_s(lo.data(), lo.size(), L"%.5f", s.mapLon);
+        ok = WriteStr(cfg, L"state", L"mapLat", la.data(), err) && WriteStr(cfg, L"state", L"mapLon", lo.data(), err);
+    }
     if (ok && s.hasPlacement) {
         ok = WriteStr(cfg, L"state", L"x", std::to_wstring(s.placement.left), err) &&
              WriteStr(cfg, L"state", L"y", std::to_wstring(s.placement.top), err) &&

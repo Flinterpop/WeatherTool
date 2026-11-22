@@ -15,6 +15,10 @@ constexpr const wchar_t* kMonthShort[12] = { L"Jan", L"Feb", L"Mar", L"Apr", L"M
 constexpr const wchar_t* kMonthLong[12]  = { L"January", L"February", L"March", L"April", L"May", L"June",
                                              L"July", L"August", L"September", L"October", L"November", L"December" };
 
+// Band chart plot margins (dip): the y labels on the left, a little room on the right.
+constexpr float kPlotLeft  = 46.0f;
+constexpr float kPlotSides = 56.0f;
+
 Font MakeFont(float pt, float s, INT style = FontStyleRegular) {
     return Font(L"Segoe UI", FontPx(pt, s), style, UnitPixel);
 }
@@ -179,6 +183,15 @@ REAL FontPx(float pt, float scale) {
     return pt * 96.0f / 72.0f * scale;
 }
 
+int BandChartSlotAt(const RectF& rc, size_t n, float x, float s) {
+    assert(n <= kMaxSlots && s > 0.0f);
+    const float left = rc.X + kPlotLeft * s;
+    const float width = rc.Width - kPlotSides * s;
+    if (n == 0 || width <= 0.0f || x < left || x >= left + width) { return -1; }
+    const int slot = static_cast<int>((x - left) / (width / static_cast<float>(n)));
+    return slot < static_cast<int>(n) ? slot : static_cast<int>(n) - 1;
+}
+
 void DrawBandChart(Graphics& g, const RectF& rc, const BandChartInput& in, float s) {
     assert(in.theme != nullptr);
     assert(in.n <= kMaxSlots);
@@ -188,7 +201,7 @@ void DrawBandChart(Graphics& g, const RectF& rc, const BandChartInput& in, float
     DrawLegend(g, RectF(rc.X, rc.Y + titleH - 18.0f * s, rc.Width, 18.0f * s), in, s);
 
     const float extraLine = in.ticks2 != nullptr ? 15.0f * s : 0.0f;
-    const RectF plot(rc.X + 46.0f * s, rc.Y + titleH + 8.0f * s, rc.Width - 56.0f * s,
+    const RectF plot(rc.X + kPlotLeft * s, rc.Y + titleH + 8.0f * s, rc.Width - kPlotSides * s,
                      rc.Height - titleH - 30.0f * s - extraLine);
     const Font fAxis = MakeFont(8.0f, s);
     if (plot.Width < 40.0f || plot.Height < 30.0f) { return; }

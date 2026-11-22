@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cwchar>
+#include <memory>
 
 namespace wt {
 namespace {
@@ -90,18 +91,25 @@ bool ParseCurrent(std::string_view j, Forecast& f) {
 bool ParseHourly(std::string_view j, Forecast& f) {
     size_t a = 0, b = 0;
     if (!Section(j, "hourly", a, b) || !TimesIn(j, a, b, f.hTime.data(), kForecastHours, f.hours)) { return false; }
-    std::array<double, kForecastHours> code{};
+    auto code = std::make_unique<std::array<double, kForecastHours>>();
     size_t n[6] = {};
     const bool ok = NumbersIn(j, a, b, "temperature_2m", f.hTemp.data(), kForecastHours, n[0]) &&
                     NumbersIn(j, a, b, "apparent_temperature", f.hFeels.data(), kForecastHours, n[1]) &&
                     NumbersIn(j, a, b, "precipitation_probability", f.hProb.data(), kForecastHours, n[2]) &&
                     NumbersIn(j, a, b, "precipitation", f.hPrecip.data(), kForecastHours, n[3]) &&
                     NumbersIn(j, a, b, "snowfall", f.hSnow.data(), kForecastHours, n[4]) &&
-                    NumbersIn(j, a, b, "weather_code", code.data(), kForecastHours, n[5]);
+                    NumbersIn(j, a, b, "weather_code", code->data(), kForecastHours, n[5]);
     for (size_t k = 0; k < 6; ++k) {
         if (n[k] != f.hours) { return false; }
     }
-    for (size_t i = 0; i < f.hours; ++i) { f.hCode[i] = CodeOf(code[i]); }
+    for (size_t i = 0; i < f.hours; ++i) { f.hCode[i] = CodeOf((*code)[i]); }
+    // Optional (added in 0.6.0): a series that is missing or the wrong length stays NaN.
+    struct Opt { const char* key; std::array<double, kForecastHours>* out; };
+    const Opt opts[3] = { { "wind_speed_10m", &f.hWind }, { "wind_gusts_10m", &f.hGust }, { "cloud_cover", &f.hCloud } };
+    for (const Opt& o : opts) {
+        size_t got = 0;
+        if (!NumbersIn(j, a, b, o.key, o.out->data(), kForecastHours, got) || got != f.hours) { o.out->fill(kNaN); }
+    }
     return ok;
 }
 
@@ -132,11 +140,12 @@ std::wstring ForecastUrl(double lat, double lon) {
                L"https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f"
                L"&current=temperature_2m,apparent_temperature,relative_humidity_2m,precipitation,snowfall,snow_depth,"
                L"weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m,is_day"
-               L"&hourly=temperature_2m,apparent_temperature,precipitation_probability,precipitation,snowfall,weather_code"
+               L"&hourly=temperature_2m,apparent_temperature,precipitation_probability,precipitation,snowfall,weather_code,"
+               L"wind_speed_10m,wind_gusts_10m,cloud_cover"
                L"&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,snowfall_sum,"
                L"precipitation_probability_max"
-               L"&timezone=auto&forecast_days=%u&forecast_hours=%u",
-               lat, lon, static_cast<unsigned>(kForecastDays), static_cast<unsigned>(kForecastHours));
+               L"&timezone=auto&forecast_days=%u",
+               lat, lon, static_cast<unsigned>(kForecastDays));
     return url.data();
 }
 
@@ -243,6 +252,20 @@ size_t FirstDayFrom(const Forecast& f, int64_t now) {
     size_t i = 0;
     while (i < f.days && LocalSeconds(f.dTime[i]) + 86400 <= local) { ++i; }
     return i;
+}
+
+void HoursOfDay(const Forecast& f, size_t day, size_t& first, size_t& count) {
+    assert(f.hours <= kForecastHours && f.days <= kForecastDays);
+    first = 0;
+    count = 0;
+    if (day >= f.days) { return; }
+    const LocalTime& d = f.dTime[day];
+    size_t i = 0;
+    while (i < f.hours && (f.hTime[i].year != d.year || f.hTime[i].month != d.month || f.hTime[i].day != d.day)) { ++i; }
+    first = i;
+    while (i < f.hours && f.hTime[i].year == d.year && f.hTime[i].month == d.month && f.hTime[i].day == d.day) { ++i; }
+    count = i - first;
+    assert(count <= 25);   // 23 to 25 across a clock change
 }
 
 int Weekday(int y, int m, int d) {

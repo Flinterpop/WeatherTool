@@ -167,9 +167,10 @@ bool HttpClient::Request(const wchar_t* method, const std::wstring& url, const s
     const BOOL decompOk = WinHttpSetOption(req.h, WINHTTP_OPTION_DECOMPRESSION, &decomp, sizeof(decomp));
     (void)decompOk;
 
+    const std::wstring agent = appIdentity_ ? std::wstring(kAgent) + L" (+https://github.com/Flinterpop/WeatherTool)"
+                                            : std::wstring(L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) ") + kAgent;
     const std::wstring headers =
-        std::wstring(L"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) ") + kAgent +
-        L"\r\nAccept: application/json, text/plain, */*\r\n" + extraHeaders;
+        L"User-Agent: " + agent + L"\r\nAccept: application/json, image/png, text/plain, */*\r\n" + extraHeaders;
     if (!WinHttpAddRequestHeaders(req.h, headers.c_str(), static_cast<DWORD>(-1),
                                   WINHTTP_ADDREQ_FLAG_ADD)) {
         err = ErrorText(L"WinHttpAddRequestHeaders", GetLastError());
