@@ -69,6 +69,8 @@ constexpr int64_t  kFramesStale    = 9 * 60;
 constexpr UINT_PTR kAnimTimer      = 5;
 constexpr UINT     kAnimEveryMs    = 700;
 constexpr int      kAnimHoldTicks  = 3;
+constexpr UINT_PTR kAgoTimer       = 6;
+constexpr UINT     kAgoEveryMs     = 30u * 1000u;
 constexpr int      kMapBtnW        = 62;
 
 // What Check for updates' worker threads hand back to the window.
@@ -320,6 +322,7 @@ bool App::Create(HINSTANCE hInst, int nCmdShow, std::wstring& err) {
     SetTimer(hwnd_, kUpdateTimer, kUpdateEveryMs, nullptr);
     SetTimer(hwnd_, kForecastTimer, kForecastEveryMs, nullptr);
     SetTimer(hwnd_, kFramesTimer, kFramesEveryMs, nullptr);
+    SetTimer(hwnd_, kAgoTimer, kAgoEveryMs, nullptr);
     if (MapTab()) { SetTab(cfg_.state.tab); }   // opened on the Map tab: fetch its frame list
     updater::CleanUp(IsInstalledCopy());   // what an update left, if anything
     SetTimer(hwnd_, kCleanUpTimer, kCleanUpAfterMs, nullptr);
@@ -367,7 +370,7 @@ LRESULT App::Handle(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSEWHEEL:  OnMouseWheel(GET_WHEEL_DELTA_WPARAM(wp), GET_X_LPARAM(lp), GET_Y_LPARAM(lp)); return 0;
     case WM_APP_TILES:
         tiles_.TakeDone();
-        if (MapTab()) { InvalidateRect(hwnd_, &mapRect_, FALSE); }
+        if (MapTab()) { InvalidateMap(); }
         return 0;
     case WM_APP_FRAMES:  OnFramesReady(); return 0;
     case WM_SETCURSOR:
@@ -384,6 +387,7 @@ LRESULT App::Handle(UINT msg, WPARAM wp, LPARAM lp) {
             tiles_.RequestFrames();
         }
         if (wp == kAnimTimer) { StepFrame(+1); }
+        if (wp == kAgoTimer && MapTab()) { InvalidateRect(hwnd_, &agoRect_, FALSE); }   // "N minutes ago" moves on
         if (wp == kCleanUpTimer) {
             KillTimer(hwnd_, kCleanUpTimer);
             if (!updateBusy_.load()) { updater::CleanUp(IsInstalledCopy()); }
@@ -743,6 +747,7 @@ void App::Layout() {
     ShowWindow(hZoomIn_, mapShow);
     MoveWindow(hZoomIn_, r0 - Px(36), row1, Px(36), bh, TRUE);
     MoveWindow(hZoomOut_, r0 - Px(72) - gap, row1, Px(36), bh, TRUE);
+    agoRect_ = map ? RECT{ mx + Px(8), row1, r0 - Px(72) - gap - Px(8), row1 + bh } : RECT{ 0, 0, 0, 0 };
 
     // History, row 1: views (+ months in Month view). The Now tab has none
     // of these, so its header moves up into their place.
@@ -1195,7 +1200,7 @@ void App::OnCommand(int id, int code) {
         cfg_.state.radar = !cfg_.state.radar;
         if (!cfg_.state.radar) { SetPlaying(false); }
         SyncControls();
-        InvalidateRect(hwnd_, &mapRect_, FALSE);
+        InvalidateMap();
         return;
     case IDC_PREV:    SetPlaying(false); StepFrame(-1); return;
     case IDC_NEXT:    SetPlaying(false); StepFrame(+1); return;
@@ -1597,6 +1602,7 @@ void App::OnPaint() {
             PaintTabLine(g);
             if (MapTab()) {
                 PaintMap(g);
+                PaintRadarAge(g);
             } else if (NowTab()) {
                 PaintNowHeader(g);
                 PaintNow(g);
@@ -2121,7 +2127,7 @@ void App::CenterMapOn(size_t index) {
     cfg_.state.mapLat = std::fmax(-80.0, std::fmin(80.0, cfg_.locs[index].lat));
     cfg_.state.mapLon = cfg_.locs[index].lon;
     cfg_.state.hasMap = true;
-    InvalidateRect(hwnd_, &mapRect_, FALSE);
+    InvalidateMap();
 }
 
 void App::PanMap(int dx, int dy) {
@@ -2133,7 +2139,7 @@ void App::PanMap(int dx, int dy) {
     cfg_.state.mapLon = slippy::XToLon(cx, z);
     cfg_.state.mapLat = slippy::YToLat(cy, z);
     cfg_.state.hasMap = true;
-    InvalidateRect(hwnd_, &mapRect_, FALSE);
+    InvalidateMap();
 }
 
 // Zoom by `steps` keeping the point under (x, y) where it is.
@@ -2152,7 +2158,7 @@ void App::ZoomMap(int steps, int x, int y) {
     if (cfg_.state.mapLon >= 180.0) { cfg_.state.mapLon -= 360.0; }
     cfg_.state.hasMap = true;
     SyncControls();
-    InvalidateRect(hwnd_, &mapRect_, FALSE);
+    InvalidateMap();
 }
 
 void App::OnFramesReady() {
@@ -2170,7 +2176,7 @@ void App::OnFramesReady() {
         if (!playing_ || atLatest || frame_ >= frames_.count) { frame_ = frames_.count - 1; }
     }
     SyncControls();
-    InvalidateRect(hwnd_, &mapRect_, FALSE);
+    InvalidateMap();
 }
 
 void App::StepFrame(int delta) {
@@ -2184,7 +2190,7 @@ void App::StepFrame(int delta) {
         assert(delta == 1 || delta == -1);
         frame_ = static_cast<size_t>(static_cast<int>(frame_) + static_cast<int>(n) + delta) % n;
     }
-    InvalidateRect(hwnd_, &mapRect_, FALSE);
+    InvalidateMap();
 }
 
 void App::SetPlaying(bool on) {
@@ -2205,6 +2211,20 @@ int App::MarkerAt(int x, int y) const {
         if (PtInRect(&markers_[k].hit, p)) { return static_cast<int>(markers_[k].index); }
     }
     return -1;
+}
+
+void App::InvalidateMap() {
+    InvalidateRect(hwnd_, &mapRect_, FALSE);   // not InvalidateMap: this is it
+    InvalidateRect(hwnd_, &agoRect_, FALSE);
+}
+
+// On the button row: how long ago the radar picture shown was taken.
+void App::PaintRadarAge(Graphics& g) {
+    const RectF r = ToRectF(agoRect_);
+    if (r.Width <= 0.0f || !cfg_.state.radar || frames_.count == 0 || frame_ >= frames_.count) { return; }
+    const std::wstring t = L"Radar picture from " + AgoText(UnixNow() - frames_.frame[frame_].time);
+    const Font f = UiFont(10.0f, scale_);
+    DrawTextClip(g, t, f, theme_->textSecondary, RectF(r.X, r.Y + (r.Height - FontPx(10.0f, scale_) * 1.35f) / 2.0f, r.Width, r.Height));
 }
 
 void App::PaintMap(Graphics& g) {

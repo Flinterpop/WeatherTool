@@ -128,6 +128,7 @@ footer a { color: inherit; }
     <div class="row" style="margin-top:12px">
       <button id="mRadar">Radar</button>
       <button id="mPrev" title="Earlier picture">◀</button><button id="mPlay">Play</button><button id="mNext" title="Later picture">▶</button>
+      <span id="mAgo" style="color:var(--text-secondary);margin-left:6px"></span>
       <span style="margin-left:auto"></span>
       <button id="mOut" title="Zoom out">−</button><button id="mIn" title="Zoom in">+</button>
     </div>
@@ -874,6 +875,23 @@ async function loadFrames() {
 
 function saveMap() { save('wh.map', mapState); }
 
+// How long ago, in the largest units that fit (as the desktop app's AgoText).
+function agoText(seconds) {
+  const unit = (n, one) => n + ' ' + one + (n === 1 ? '' : 's');
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return unit(minutes, 'minute') + ' ago';
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return unit(hours, 'hour') + (minutes % 60 ? ' ' + unit(minutes % 60, 'minute') : '') + ' ago';
+  const days = Math.floor(hours / 24);
+  return unit(days, 'day') + (hours % 24 ? ' ' + unit(hours % 24, 'hour') : '') + ' ago';
+}
+function updateAgo() {
+  const f = radarState.frames[radarState.i];
+  $('mAgo').textContent = mapState.radar && f ? 'Radar picture from ' + agoText(Date.now() / 1000 - f.time) : '';
+}
+setInterval(() => { if (state.tab === 'map') updateAgo(); }, 30e3);
+
 function renderMap() {
   const box = $('mapBox');
   if (mapState.lat == null && state.loc) { mapState.lat = state.loc.lat; mapState.lon = state.loc.lon; }
@@ -927,6 +945,7 @@ function renderMap() {
       sw(['#c4ffff', '#7fbfff', '#2f6fff', '#0022ff']) + ' heavy</div>');
   }
   box.innerHTML = html.join('');
+  updateAgo();
   $('mRadar').classList.toggle('on', mapState.radar);
   $('mPlay').classList.toggle('on', !!rs.playing);
   for (const id of ['mPrev', 'mPlay', 'mNext']) $(id).disabled = !mapState.radar || rs.frames.length < 2;

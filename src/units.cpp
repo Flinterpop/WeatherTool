@@ -56,6 +56,24 @@ const wchar_t* CompassPoint(double degrees) {
     return kPoints[k];
 }
 
+std::wstring AgoText(int64_t seconds) {
+    auto unit = [](int64_t n, const wchar_t* one) {
+        return std::to_wstring(n) + L" " + one + (n == 1 ? L"" : L"s");
+    };
+    const int64_t minutes = seconds / 60;
+    if (minutes < 1) { return L"just now"; }
+    if (minutes < 60) { return unit(minutes, L"minute") + L" ago"; }
+    const int64_t hours = minutes / 60;
+    if (hours < 24) {
+        const int64_t m = minutes % 60;
+        return unit(hours, L"hour") + (m > 0 ? L" " + unit(m, L"minute") : L"") + L" ago";
+    }
+    const int64_t days = hours / 24;
+    const int64_t h = hours % 24;
+    assert(days >= 1);
+    return unit(days, L"day") + (h > 0 ? L" " + unit(h, L"hour") : L"") + L" ago";
+}
+
 std::wstring SeasonLabel(int startYear) {
     std::array<wchar_t, 16> b{};
     swprintf_s(b.data(), b.size(), L"%d–%02d", startYear, (startYear + 1) % 100);

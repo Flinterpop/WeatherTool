@@ -50,6 +50,8 @@ private:
     // Map tab
     void PaintMap(Gdiplus::Graphics& g);
     void PaintMapOverlays(Gdiplus::Graphics& g, const Gdiplus::RectF& r);
+    void PaintRadarAge(Gdiplus::Graphics& g);
+    void InvalidateMap();   // the map and its age label
     void PaintMarkers(Gdiplus::Graphics& g, const Gdiplus::RectF& r, double ox, double oy);   // screen = o + map px * scale
     void CenterMapOn(size_t index);
     void ZoomMap(int steps, int x, int y);
@@ -162,6 +164,7 @@ private:
     RECT bottomRect_{};   // snowfall panel
     RECT statusRect_{};
     RECT mapRect_{};      // Map tab
+    RECT agoRect_{};      // Map tab: "40 minutes ago", on the button row after ▶
 
     // Map tab state
     TileStore     tiles_;

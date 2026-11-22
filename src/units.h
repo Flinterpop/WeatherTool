@@ -2,6 +2,7 @@
 // conversion happens only on the way to the screen.
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 namespace wt {
@@ -38,5 +39,10 @@ const wchar_t* CompassPoint(double degrees);  // 0 -> L"N", 225 -> L"SW"; L"" fo
 std::wstring FmtNumber(double v, int decimals, const wchar_t* unit, bool sign = false);
 
 std::wstring SeasonLabel(int startYear);              // 1998 -> "1998–99"
+
+// How long ago, in the largest units that fit: "just now", "40 minutes ago",
+// "1 hour 5 minutes ago", "3 days 2 hours ago". Negative ages (a clock a
+// little behind the server's) read as "just now".
+std::wstring AgoText(int64_t seconds);
 
 } // namespace wt

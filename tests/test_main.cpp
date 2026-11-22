@@ -222,6 +222,11 @@ void TestUnits() {
     CHECK(SeasonLabel(1999) == L"1999–00");
     CHECK(FmtTemp(-1.84, Units::Metric) == L"−1.8 °C");   // a real minus sign
     CHECK(FmtTemp(-0.04, Units::Metric) == L"0.0 °C");         // no "-0.0"
+    CHECK(AgoText(-30) == L"just now" && AgoText(59) == L"just now");
+    CHECK(AgoText(60) == L"1 minute ago" && AgoText(40 * 60 + 59) == L"40 minutes ago");
+    CHECK(AgoText(3600) == L"1 hour ago" && AgoText(3600 + 5 * 60) == L"1 hour 5 minutes ago");
+    CHECK(AgoText(2 * 3600 + 60) == L"2 hours 1 minute ago" && AgoText(23 * 3600 + 59 * 60) == L"23 hours 59 minutes ago");
+    CHECK(AgoText(86400) == L"1 day ago" && AgoText(3 * 86400 + 2 * 3600 + 30 * 60) == L"3 days 2 hours ago");
 }
 
 // A forecast reply laid out as Open-Meteo sends it, *_units sections first
