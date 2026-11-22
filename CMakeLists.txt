@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 # Single source of truth for the version: it flows into the code
 # (WEATHERTOOL_VERSION*) and the exe's VERSIONINFO resource from here.
-project(WeatherTool VERSION 0.8.0 LANGUAGES CXX RC)
+project(WeatherTool VERSION 0.8.1 LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

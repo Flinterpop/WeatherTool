@@ -56,7 +56,9 @@ private:
     void PaintRadar(Gdiplus::Graphics& g, const Gdiplus::RectF& r, double ox, double oy);
     void PaintAlerts(Gdiplus::Graphics& g, const Gdiplus::RectF& r, double ox, double oy);
     void PaintSatellite(Gdiplus::Graphics& g, const Gdiplus::RectF& r, double ox, double oy);
-    int64_t SatTime(size_t frame) const;   // the satellite picture shown with radar frame `frame`
+    int64_t SatTime(size_t frame) const;   // the satellite picture shown at step `frame`
+    size_t  StepCount() const;             // pictures to step through: the radar's, or the satellite's
+    void    ToLatest();
     void PaintPrecipTypeKey(Gdiplus::Graphics& g, const Gdiplus::RectF& r);
     void PaintAlertsKey(Gdiplus::Graphics& g, Gdiplus::REAL y, const Gdiplus::RectF& r);
     std::wstring MapCredit() const;

@@ -892,6 +892,17 @@ function satFor(z, x, y) {
 }
 // The satellite picture shown with a radar picture: the newest at or before it, none newer than there is.
 const satTimeFor = t => Math.min(Math.floor(t / 600) * 600, radarState.satLatest);
+// The pictures ◀ / ▶ and Play step through: the radar's, or with the radar off the satellite's last 16
+// (as the app's StepCount). The alerts have no past, so they stay as they are now.
+const SAT_FRAMES = 16;
+function radarFrames() { return radarState.src === mapState.src ? radarState.frames : []; }
+function stepCount() { return mapState.radar ? radarFrames().length : (mapState.sat && radarState.satLatest ? SAT_FRAMES : 0); }
+function satTimeAt(i) {
+  const fr = radarFrames()[i];
+  if (!mapState.radar) return radarState.satLatest - (SAT_FRAMES - 1 - i) * 600;
+  return fr ? satTimeFor(fr.time) : radarState.satLatest;
+}
+function toLatest() { setPlaying(false); radarState.i = Math.max(0, stepCount() - 1); }
 // The radar layer's time dimension ("start/end/PT6M" or a comma list) as frames MSC_STEP apart.
 function mscFrames(xml) {
   const m = /<Dimension name="time"[^>]*>([^<]*)</.exec(xml);
@@ -933,9 +944,9 @@ async function loadFrames() {
       } catch (e) { /* no satellite this time */ }
     }
     if (src !== mapState.src) return;   // the source changed meanwhile
-    const atLatest = radarState.src !== src || !radarState.frames.length || radarState.i >= radarState.frames.length - 1;
+    const atLatest = radarState.src !== src || !stepCount() || radarState.i >= stepCount() - 1;
     radarState.src = src; radarState.host = host; radarState.frames = frames; radarState.error = '';
-    if (!radarState.playing || atLatest) radarState.i = radarState.frames.length - 1;
+    if (stepCount() && (!radarState.playing || atLatest || radarState.i >= stepCount())) radarState.i = stepCount() - 1;
   } catch (e) { if (src === mapState.src) radarState.error = e.message; }
   if (state.tab === 'map') renderMap();
 }
@@ -954,8 +965,10 @@ function agoText(seconds) {
   return unit(days, 'day') + (hours % 24 ? ' ' + unit(hours % 24, 'hour') : '') + ' ago';
 }
 function updateAgo() {
-  const f = radarState.frames[radarState.i];
-  $('mAgo').textContent = mapState.radar && f ? 'Radar picture from ' + agoText(Date.now() / 1000 - f.time) : '';
+  const i = radarState.i, f = radarFrames()[i];
+  $('mAgo').textContent = i >= stepCount() ? ''
+    : mapState.radar ? (f ? 'Radar picture from ' + agoText(Date.now() / 1000 - f.time) : '')
+    : 'Satellite picture from ' + agoText(Date.now() / 1000 - satTimeAt(i));
 }
 setInterval(() => { if (state.tab === 'map') updateAgo(); }, 30e3);
 
@@ -986,7 +999,8 @@ function renderMap() {
     }
   };
   const rs = radarState, f = rs.src === mapState.src ? rs.frames[rs.i] : null, na = mapState.src === 'na';
-  const satT = mapState.sat && rs.satLatest ? (mapState.radar && f ? satTimeFor(f.time) : rs.satLatest) : 0;
+  const satT = mapState.sat && rs.satLatest ? satTimeAt(Math.min(rs.i, Math.max(0, stepCount() - 1))) : 0;
+  const satOnly = !mapState.radar && !!satT;   // stepping through the satellite's own pictures
   if (satT) overlay('sat', MSC_MAXZ, (zr, x, y) => { const s = satFor(zr, x, y); return s ? mscUrl(s, satT, zr, x, y) : ''; });
   if (mapState.alerts) {   // the alerts in effect: asked for again every 10 minutes
     const slot = Math.floor(Date.now() / 600e3) * 600;
@@ -1003,8 +1017,11 @@ function renderMap() {
     html.push('<div class="marker" style="left:' + Math.round(x) + 'px;top:' + Math.round(oy + latToY(state.loc.lat, z)) + 'px"><i></i><span>' +
       esc(state.loc.name.split(',')[0] + t) + '</span></div>');
   }
+  const hm = t => new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   let label = 'Radar off';
-  if (mapState.radar) {
+  if (satOnly) {
+    label = 'Satellite ' + hm(satT) + (rs.i >= SAT_FRAMES - 1 ? ' (latest)' : ' (' + (rs.i + 1) + ' of ' + SAT_FRAMES + ')') + ' · radar off';
+  } else if (mapState.radar) {
     if (!f) label = rs.error ? 'Radar unavailable: ' + rs.error : 'Loading radar…';
     else {
       label = 'Radar ' + new Date(f.time * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) +
@@ -1014,11 +1031,10 @@ function renderMap() {
     }
   }
   const sw = cs => cs.map(c => '<i class="sw2" style="background:' + c + '"></i>').join('');
-  if (mapState.sat) label += satT ? ' · satellite ' + new Date(satT * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-                                  : ' · loading satellite…';
+  if (mapState.sat && !satOnly) label += satT ? ' · satellite ' + hm(satT) : ' · loading satellite…';
   html.push('<div class="mapnote" style="left:8px;top:8px;font-weight:600">' + esc(label) + '</div>');
   if (mapState.alerts) {
-    html.push('<div class="mapnote" style="left:8px;top:34px">Alerts ' + sw(['#ffff00', '#ffa500', '#ff0000']) + ' yellow, orange, red &nbsp;' +
+    html.push('<div class="mapnote" style="left:8px;top:34px">Alerts now ' + sw(['#ffff00', '#ffa500', '#ff0000']) + ' yellow, orange, red &nbsp;' +
       sw(['#d3d3d3']) + ' statement</div>');
   }
   const eccc = (mapState.radar && na) || mapState.alerts || mapState.sat;
@@ -1046,7 +1062,7 @@ function renderMap() {
   $('mAlerts').classList.toggle('on', mapState.alerts);
   $('mSat').classList.toggle('on', mapState.sat);
   $('mPlay').classList.toggle('on', !!rs.playing);
-  for (const id of ['mPrev', 'mPlay', 'mNext']) $(id).disabled = !mapState.radar || rs.frames.length < 2;
+  for (const id of ['mPrev', 'mPlay', 'mNext']) $(id).disabled = stepCount() < 2;
   $('mOut').disabled = z <= MINZ; $('mIn').disabled = z >= MAXZ;
 }
 
@@ -1069,7 +1085,7 @@ function zoomMap(steps, px, py) {   // keeps the point under (px, py) where it i
 }
 
 function stepFrame(d) {
-  const rs = radarState, n = rs.frames.length;
+  const rs = radarState, n = stepCount();
   if (!n) return;
   if (rs.playing && d > 0 && rs.i === n - 1) { if (++rs.hold < 3) return; rs.hold = 0; rs.i = 0; }
   else rs.i = (rs.i + n + d) % n;
@@ -1078,7 +1094,7 @@ function stepFrame(d) {
 function setPlaying(on) {
   const rs = radarState;
   if (rs.playing) { clearInterval(rs.playing); rs.playing = 0; }
-  if (on && mapState.radar && rs.frames.length > 1) rs.playing = setInterval(() => stepFrame(1), 700);
+  if (on && stepCount() > 1) rs.playing = setInterval(() => stepFrame(1), 700);
   rs.hold = 0; renderMap();
 }
 
@@ -1101,7 +1117,7 @@ function setPlaying(on) {
   box.addEventListener('pointerup', end); box.addEventListener('pointercancel', end);
   box.addEventListener('wheel', e => { e.preventDefault(); const r = box.getBoundingClientRect();
     zoomMap(e.deltaY < 0 ? 1 : -1, e.clientX - r.left, e.clientY - r.top); }, { passive: false });
-  $('mRadar').onclick = () => { mapState.radar = !mapState.radar; if (!mapState.radar) setPlaying(false); saveMap(); renderMap(); };
+  $('mRadar').onclick = () => { mapState.radar = !mapState.radar; saveMap(); toLatest(); };   // the pictures stepped through change
   const setSrc = src => {
     if (src === mapState.src) return;
     mapState.src = src; saveMap(); setPlaying(false);
@@ -1110,7 +1126,8 @@ function setPlaying(on) {
   };
   $('mWorld').onclick = () => setSrc('world'); $('mNA').onclick = () => setSrc('na');
   $('mAlerts').onclick = () => { mapState.alerts = !mapState.alerts; saveMap(); renderMap(); };
-  $('mSat').onclick = () => { mapState.sat = !mapState.sat; saveMap(); if (mapState.sat && !radarState.satLatest) loadFrames(); renderMap(); };
+  $('mSat').onclick = () => { mapState.sat = !mapState.sat; saveMap(); if (mapState.sat && !radarState.satLatest) loadFrames();
+    if (!mapState.radar) toLatest(); else renderMap(); };
   $('mPrev').onclick = () => { setPlaying(false); stepFrame(-1); };
   $('mNext').onclick = () => { setPlaying(false); stepFrame(1); };
   $('mPlay').onclick = () => setPlaying(!radarState.playing);
@@ -1207,9 +1224,10 @@ function locFromHash() {
 // The Forecast tab was called Now until 0.7.1, so &tab=now still opens it; 'now' is its name inside.
 const hashTab = /(?:^|[#&])tab=(now|forecast|map)(?:&|$)/.exec(location.hash);
 if (hashTab) state.tab = hashTab[1] === 'map' ? 'map' : 'now';
-// ...&radar=na or &radar=world, &alerts=1 or 0 and &satellite=1 or 0 choose the map's overlays the same way.
+// ...&radar=na, world or off, &alerts=1 or 0 and &satellite=1 or 0 choose the map's overlays the same way.
 const hashMap = new URLSearchParams(location.hash.slice(1));
-if (/^(na|world)$/.test(hashMap.get('radar') || '')) mapState.src = hashMap.get('radar');
+if (/^(na|world)$/.test(hashMap.get('radar') || '')) { mapState.src = hashMap.get('radar'); mapState.radar = true; }
+if (hashMap.get('radar') === 'off') mapState.radar = false;
 if (/^[01]$/.test(hashMap.get('alerts') || '')) mapState.alerts = hashMap.get('alerts') === '1';
 if (/^[01]$/.test(hashMap.get('satellite') || '')) mapState.sat = hashMap.get('satellite') === '1';
 const saved = locFromHash() || load('wh.loc');

@@ -76,6 +76,7 @@ constexpr UINT_PTR kAgoTimer       = 6;
 constexpr UINT     kAgoEveryMs     = 30u * 1000u;
 constexpr int      kMapBtnW        = 62;
 constexpr int64_t  kAlertsEvery    = 600;
+constexpr size_t   kSatFrames      = 16;      // with the radar off: the satellite's last 2.5 hours
 
 // What Check for updates' worker threads hand back to the window.
 struct UpdateResult {
@@ -831,7 +832,7 @@ void App::SyncControls() {
     SetCheck(hAlerts_, s.alerts);
     SetCheck(hSatellite_, s.satellite);
     SetCheck(hPlay_, playing_);
-    const bool frames = s.radar && frames_.count > 1;
+    const bool frames = StepCount() > 1;
     EnableWindow(hPrev_, frames);
     EnableWindow(hPlay_, frames);
     EnableWindow(hNext_, frames);
@@ -1219,7 +1220,7 @@ void App::OnCommand(int id, int code) {
     switch (id) {   // Map tab buttons
     case IDC_RADAR:
         cfg_.state.radar = !cfg_.state.radar;
-        if (!cfg_.state.radar) { SetPlaying(false); }
+        ToLatest();   // the pictures stepped through change (radar's or satellite's)
         SyncControls();
         InvalidateMap();
         return;
@@ -1247,6 +1248,7 @@ void App::OnCommand(int id, int code) {
             framesAsked_ = UnixNow();
             tiles_.RequestFrames(RadarSource(), true);
         }
+        if (!cfg_.state.radar) { ToLatest(); }   // the satellite's own pictures appear or go
         SyncControls();
         InvalidateMap();
         return;
@@ -2227,17 +2229,18 @@ void App::OnFramesReady() {
     } else if (f.source != RadarSource()) {
         return;   // asked for before the source was changed
     } else {
-        const bool atLatest = frames_.count == 0 || frame_ + 1 >= frames_.count;
+        const bool atLatest = StepCount() == 0 || frame_ + 1 >= StepCount();
         frames_ = f;
         framesError_.clear();
-        if (!playing_ || atLatest || frame_ >= frames_.count) { frame_ = frames_.count - 1; }
+        const size_t n = StepCount();
+        if (n > 0 && (!playing_ || atLatest || frame_ >= n)) { frame_ = n - 1; }
     }
     SyncControls();
     InvalidateMap();
 }
 
 void App::StepFrame(int delta) {
-    const size_t n = frames_.count;
+    const size_t n = StepCount();
     if (n == 0) { return; }
     if (playing_ && delta > 0 && frame_ + 1 == n) {   // hold on the latest frame for a moment
         if (++holdTicks_ < kAnimHoldTicks) { return; }
@@ -2251,7 +2254,7 @@ void App::StepFrame(int delta) {
 }
 
 void App::SetPlaying(bool on) {
-    if (on && (frames_.count < 2 || !cfg_.state.radar)) { on = false; }
+    if (on && StepCount() < 2) { on = false; }
     playing_ = on;
     holdTicks_ = 0;
     if (on) {
@@ -2278,10 +2281,11 @@ void App::InvalidateMap() {
 // On the button row: how long ago the radar picture shown was taken.
 void App::PaintRadarAge(Graphics& g) {
     const RectF r = ToRectF(agoRect_);
-    if (r.Width <= 0.0f || !cfg_.state.radar || frames_.count == 0 || frame_ >= frames_.count) { return; }
-    const std::wstring ago = AgoText(UnixNow() - frames_.frame[frame_].time);
+    if (r.Width <= 0.0f || frame_ >= StepCount()) { return; }
+    const bool radarOn = cfg_.state.radar;   // else the satellite's own pictures
+    const std::wstring ago = AgoText(UnixNow() - (radarOn ? frames_.frame[frame_].time : SatTime(frame_)));
     const Font f = UiFont(10.0f, scale_);
-    std::wstring t = L"Radar picture from " + ago;
+    std::wstring t = (radarOn ? L"Radar picture from " : L"Satellite picture from ") + ago;
     if (TextW(g, t, f) > r.Width) { t = ago; }   // a narrow window: just "1 hour 10 minutes ago"
     DrawTextClip(g, t, f, theme_->textSecondary, RectF(r.X, r.Y + (r.Height - FontPx(10.0f, scale_) * 1.35f) / 2.0f, r.Width, r.Height));
 }
@@ -2407,8 +2411,26 @@ void App::PaintRadar(Graphics& g, const RectF& r, double ox, double oy) {
 // with the radar off). Nearly opaque: the map shows through only faintly.
 int64_t App::SatTime(size_t frame) const {
     assert(frames_.satLatest > 0);
-    if (!cfg_.state.radar || frame >= frames_.count) { return frames_.satLatest; }
+    if (!cfg_.state.radar) {   // the satellite's own pictures, oldest first
+        if (frame >= kSatFrames) { return frames_.satLatest; }
+        return frames_.satLatest - static_cast<int64_t>(kSatFrames - 1 - frame) * radar::kSatStep;
+    }
+    if (frame >= frames_.count) { return frames_.satLatest; }
     return radar::SatTimeFor(frames_.frame[frame].time, frames_.satLatest);
+}
+
+// The pictures ◀ / ▶ and Play step through: the radar's, or with the radar
+// off and the satellite on, the satellite's last kSatFrames.
+size_t App::StepCount() const {
+    if (cfg_.state.radar) { return frames_.count; }
+    return cfg_.state.satellite && frames_.satLatest > 0 ? kSatFrames : 0;
+}
+
+// Back to the newest picture, stopped (the radar or satellite was switched).
+void App::ToLatest() {
+    SetPlaying(false);
+    const size_t n = StepCount();
+    frame_ = n > 0 ? n - 1 : 0;
 }
 
 void App::PaintSatellite(Graphics& g, const RectF& r, double ox, double oy) {
@@ -2421,7 +2443,7 @@ void App::PaintSatellite(Graphics& g, const RectF& r, double ox, double oy) {
     }
     see.SetColorMatrix(&am);
     const int64_t now = SatTime(frame_);
-    const int64_t next = playing_ && frames_.count > 0 ? SatTime((frame_ + 1) % frames_.count) : now;
+    const int64_t next = playing_ && StepCount() > 0 ? SatTime((frame_ + 1) % StepCount()) : now;
     auto key = [&](int64_t t, radar::MscLayer which, int x, int y) {
         return L"radar_" + std::to_wstring(t) + (which == radar::MscLayer::SatEast ? L"_se" : L"_sw") + std::to_wstring(zr) + L"_" +
                std::to_wstring(x) + L"_" + std::to_wstring(y);
@@ -2518,7 +2540,18 @@ void App::PaintMapOverlays(Graphics& g, const RectF& r) {
     };
     // Top left: which radar picture this is.
     std::wstring t;
-    if (!cfg_.state.radar) {
+    const bool satOnly = !cfg_.state.radar && cfg_.state.satellite && frames_.satLatest > 0;
+    if (satOnly) {   // stepping through the satellite's own pictures
+        tm l{};
+        const __time64_t st = SatTime(frame_);
+        _localtime64_s(&l, &st);
+        std::array<wchar_t, 48> b{};
+        swprintf_s(b.data(), b.size(), L"Satellite %02d:%02d", l.tm_hour, l.tm_min);
+        t = b.data();
+        t += frame_ + 1 >= kSatFrames ? L" (latest)"
+                                      : L"  (" + std::to_wstring(frame_ + 1) + L" of " + std::to_wstring(kSatFrames) + L")";
+        t += L" · radar off";
+    } else if (!cfg_.state.radar) {
         t = L"Radar off";
     } else if (frames_.count == 0) {
         t = framesError_.empty() ? L"Loading radar…" : L"Radar unavailable: " + framesError_;
@@ -2534,7 +2567,7 @@ void App::PaintMapOverlays(Graphics& g, const RectF& r) {
         if (frames_.source == radar::Source::NorthAmerica) { t += L" · North America only"; }
         if (cfg_.state.mapZoom - 1 > radar::MaxZoom(frames_.source)) { t += L" · coarser than the map at this zoom"; }
     }
-    if (cfg_.state.satellite) {
+    if (cfg_.state.satellite && !satOnly) {
         if (frames_.satLatest <= 0) {
             t += L" · loading satellite…";
         } else {
@@ -2646,7 +2679,7 @@ void App::PaintAlertsKey(Graphics& g, REAL y, const RectF& r) {
     const Font f = UiFont(8.5f, s);
     static const ARGB kLevels[] = { 0xFFFFFF00, 0xFFFFA500, 0xFFFF0000 };
     static const ARGB kStatement[] = { 0xFFD3D3D3 };
-    const wchar_t* name = L"Alerts";
+    const wchar_t* name = L"Alerts now";   // the layer has no past: Play leaves them as they are now
     const REAL nw = TextW(g, name, f) + 8.0f * s;
     const REAL tw = TextW(g, L"yellow, orange, red", f) + TextW(g, L"statement", f);
     const RectF b(r.X + 8.0f * s, y, 6.0f * s + nw + 48.0f * s + tw + 40.0f * s, 20.0f * s);
