@@ -52,7 +52,7 @@ constexpr UINT_PTR kUpdateTimer   = 1;
 constexpr UINT     kUpdateEveryMs = 30u * 60u * 1000u;
 constexpr int64_t  kStaleSeconds  = 6 * 3600;
 // Open-Meteo refreshes current conditions every 15 minutes; asking more
-// often returns the same values. Forecasts are fetched only while the Now
+// often returns the same values. Forecasts are fetched only while the Forecast
 // tab is showing.
 constexpr UINT_PTR kForecastTimer   = 2;
 constexpr UINT     kForecastEveryMs = 15u * 60u * 1000u;
@@ -103,7 +103,7 @@ constexpr int kMinH     = 720;
 constexpr int kTabH     = 30;
 constexpr int kTabW     = 96;
 
-constexpr const wchar_t* kTabNames[kTabCount]   = { L"History", L"Now", L"Map" };
+constexpr const wchar_t* kTabNames[kTabCount]   = { L"History", L"Forecast", L"Map" };
 constexpr const wchar_t* kViewNames[kViewCount] = { L"Trends", L"Month", L"Heatmap", L"Climate" };
 constexpr const wchar_t* kDayShort[7] = { L"Sun", L"Mon", L"Tue", L"Wed", L"Thu", L"Fri", L"Sat" };
 constexpr const wchar_t* kRangeNames[]          = { L"All years", L"50 years", L"30 years", L"20 years" };
@@ -448,7 +448,7 @@ void App::OnCreate() {
     AppendMenuW(place, MF_STRING, IDM_REDOWNLOAD, L"Re-download &full history");
     HMENU view = CreatePopupMenu();
     AppendMenuW(view, MF_STRING, IDM_TAB0, L"&History tab");
-    AppendMenuW(view, MF_STRING, IDM_TAB1, L"&Now tab (current weather and forecast)");
+    AppendMenuW(view, MF_STRING, IDM_TAB1, L"&Forecast tab (the weather now and the forecast)");
     AppendMenuW(view, MF_STRING, IDM_TABMAP, L"M&ap tab (radar)");
     AppendMenuW(view, MF_STRING, IDM_TABNEXT, L"Switch ta&b\tCtrl+Tab");
     AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
@@ -729,7 +729,7 @@ void App::Layout() {
     MoveWindow(hRemove_, m + bw + gap, btnY, bw, bh, TRUE);
     MoveWindow(hUpdate_, listR - bw, btnY, bw, bh, TRUE);
 
-    // Tab row: History / Now on the left, units at the right, a rule under it.
+    // Tab row: History / Forecast / Map on the left, units at the right, a rule under it.
     const int x0 = listR + Px(16);
     const int r0 = w - m;
     for (size_t t = 0; t < hTabs_.size(); ++t) {
@@ -763,7 +763,7 @@ void App::Layout() {
     }
     agoRect_ = map ? RECT{ mx + Px(8), row1, rx - Px(8), row1 + bh } : RECT{ 0, 0, 0, 0 };
 
-    // History, row 1: views (+ months in Month view). The Now tab has none
+    // History, row 1: views (+ months in Month view). The Forecast tab has none
     // of these, so its header moves up into their place.
     const bool history = !NowTab() && !map;
     const int show = history ? SW_SHOW : SW_HIDE;
@@ -904,7 +904,7 @@ void App::LoadCaches() {
             errors_[i] = L"Cache unreadable (" + err + L"); downloading again.";
             c = Climate{};
         }
-        // The last forecast reply, so the Now tab opens with something; its
+        // The last forecast reply, so the Forecast tab opens with something; its
         // age is the file's.
         const std::wstring fk = ForecastKeyFor(cfg_.locs[i]);
         Forecast& f = (*forecasts_)[i];
@@ -917,7 +917,7 @@ void App::LoadCaches() {
 }
 
 void App::ScheduleForecasts(bool force) {
-    if (!NowTab() && !MapTab() && !force) { return; }   // only fetched while someone can see them (Now, Map markers)
+    if (!NowTab() && !MapTab() && !force) { return; }   // only fetched while someone can see them (Forecast tab, Map markers)
     const int64_t now = UnixNow();
     for (size_t i = 0; i < cfg_.locCount; ++i) {
         const Forecast& f = (*forecasts_)[i];
@@ -1079,7 +1079,7 @@ bool App::AddPlace(const Location& loc, std::wstring& err) {
     if (!SaveLocations(cfg_, err)) { return false; }
     RebuildList();
     SelectPlace(idx);
-    ScheduleForecasts(false);   // on the Now tab, fetch its forecast first
+    ScheduleForecasts(false);   // on the Forecast tab, fetch its forecast first
     if (!QueueUpdate(idx, false)) {
         err = L"Added, but the download queue is full; press Update later.";
         return false;
@@ -1146,7 +1146,7 @@ void App::SetView(int view) {
     assert(view >= 0 && view < kViewCount);
     cfg_.state.view = view;
     if (NowTab()) {
-        SetTab(static_cast<int>(Tab::History));   // Ctrl+1..4 from the Now tab
+        SetTab(static_cast<int>(Tab::History));   // Ctrl+1..4 from the Forecast tab
         return;
     }
     SyncControls();
@@ -1335,7 +1335,7 @@ void App::OnCommand(int id, int code) {
         const std::wstring t = std::wstring(kAppName) + L" " + kVersion +
             L"\n\nHistorical temperature and snowfall for the places you choose, and their weather now.\n\n"
             L"Weather data by Open-Meteo.com, licensed CC BY 4.0. History: ERA5 and ERA5-Land reanalysis from the "
-            L"Copernicus Climate Change Service. Now: Open-Meteo's forecast from national weather services' models. "
+            L"Copernicus Climate Change Service. Forecast: Open-Meteo's forecast from national weather services' models. "
             L"Map: © OpenStreetMap contributors (openstreetmap.org/copyright); world radar: weather data by RainViewer "
             L"(rainviewer.com); North American radar and weather alerts: Data Source: Environment and Climate Change "
             L"Canada, under the Environment and Climate Change Canada Data Services End-use Licence "
@@ -1408,7 +1408,7 @@ int App::DaySlotAt(int x, int y) const {
     return slot < 0 ? -1 : static_cast<int>(d0) + slot;
 }
 
-// Now tab: a click on a day of the 16-day chart shows that day hour by hour
+// Forecast tab: a click on a day of the 16-day chart shows that day hour by hour
 // above; a click on the same day goes back to the next 48 hours.
 void App::OnLButtonDown(int x, int y) {
     const POINT p{ x, y };
@@ -1542,7 +1542,7 @@ void App::DrawTab(const DRAWITEMSTRUCT* dis) {
     }
 }
 
-// Now tab: the temperature and conditions now, and today's high and low.
+// Forecast tab: the temperature and conditions now, and today's high and low.
 void App::DrawListRowNow(Graphics& g, const RectF& r, size_t i) {
     const float s = scale_;
     const float pad = 10.0f * s;
@@ -1925,7 +1925,7 @@ void App::PaintClimate(Graphics& g, const Climate& c) {
 }
 
 // ---------------------------------------------------------------------------
-// The Now tab
+// The Forecast tab
 
 void App::PaintTabLine(Graphics& g) {
     SolidBrush b(theme_->grid);

@@ -1,6 +1,8 @@
-// Main window: places list, History / Now tabs, view toolbar, header
-// figures, two chart panels (History: temperature above, snowfall below;
-// Now: the next 48 hours above, the next 16 days below) and a status line.
+// Main window: places list, History / Forecast / Map tabs, view toolbar,
+// header figures, two chart panels (History: temperature above, snowfall
+// below; Forecast: the next 48 hours above, the next 16 days below), the map,
+// and a status line. Inside, the Forecast tab is still Tab::Now (its name
+// until 0.7.1, kept so saved settings carry over).
 #pragma once
 
 #include "chart.h"
@@ -68,7 +70,7 @@ private:
     int  MarkerAt(int x, int y) const;   // place index, -1 none
     bool MapTab() const { return cfg_.state.tab == static_cast<int>(Tab::Map); }
     bool OnSetCursor();   // true when it set one
-    int  DaySlotAt(int x, int y) const;   // Now tab: the 16-day chart's day under (x, y), as a daily index; -1 none
+    int  DaySlotAt(int x, int y) const;   // Forecast tab: the 16-day chart's day under (x, y), as a daily index; -1 none
     void OnDpiChanged(WPARAM wp, LPARAM lp);
     void OnMeasureItem(MEASUREITEMSTRUCT* mis) const;
     void OnDrawItem(const DRAWITEMSTRUCT* dis);
@@ -167,7 +169,7 @@ private:
     int     bufW_ = 0;
     int     bufH_ = 0;
 
-    RECT tabLine_{};      // the rule under the History / Now tabs
+    RECT tabLine_{};      // the rule under the History / Forecast tabs
     RECT headerRect_{};
     RECT topRect_{};      // temperature panel
     RECT bottomRect_{};   // snowfall panel
@@ -206,7 +208,7 @@ private:
     std::thread       updateThread_;
     std::atomic<bool> updateBusy_{ false };
     std::atomic<bool> updateCancel_{ false };
-    int   dayPick_ = -1;   // Now tab: daily index shown hour by hour, -1 = the next 48 hours
+    int   dayPick_ = -1;   // Forecast tab: daily index shown hour by hour, -1 = the next 48 hours
     float scale_  = 1.0f;
     int   hoverX_ = -1;
     int   hoverY_ = -1;

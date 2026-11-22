@@ -14,7 +14,7 @@ namespace wt {
 
 constexpr size_t kForecastDays  = 16;
 constexpr size_t kForecastHours = kForecastDays * 24;   // every hour of every forecast day
-constexpr size_t kNextHours     = 48;                   // the Now tab's top chart by default
+constexpr size_t kNextHours     = 48;                   // the Forecast tab's top chart by default
 
 // A local date and time at the place, as the provider gives it.
 struct LocalTime {

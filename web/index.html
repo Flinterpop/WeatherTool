@@ -94,7 +94,7 @@ footer a { color: inherit; }
 <body>
 <header>
   <h1>WeatherTool</h1>
-  <div class="tabs" id="tabs"><button data-t="history">History</button><button data-t="now">Now</button><button data-t="map">Map</button></div>
+  <div class="tabs" id="tabs"><button data-t="history">History</button><button data-t="now">Forecast</button><button data-t="map">Map</button></div>
   <form id="searchForm" class="row">
     <input id="q" placeholder="Town or city" size="22" autocomplete="off">
     <button type="submit">Search</button>
@@ -335,7 +335,7 @@ async function loadLocation(loc) {
   state.loc = loc; save('wh.loc', loc);
   history.replaceState(null, '', '#lat=' + loc.lat + '&lon=' + loc.lon + '&name=' + encodeURIComponent(loc.name));
   $('results').innerHTML = '';
-  // The forecast is small and loads alongside the history, so the Now tab
+  // The forecast is small and loads alongside the history, so the Forecast tab
   // does not wait for a 1 MB download.
   state.fc = null; state.fcError = ''; state.raw = null; state.d = null; state.day = null;
   loadForecast(loc);
@@ -741,7 +741,7 @@ function renderTable() {
   $('table').innerHTML = '<table><thead><tr><th>Year</th><th>Mean</th><th>Avg high</th><th>Avg low</th><th>Season</th><th>Snowfall</th></tr></thead><tbody>' + rows.join('') + '</tbody></table>';
 }
 
-/* ---------- the Now tab ---------- */
+/* ---------- the Forecast tab (inside: 'now') ---------- */
 const hhmm = s => s.slice(11, 16);
 function firstFrom(times, spanMs) {   // the first slot not yet over at the place
   const nowLocal = Date.now() + state.fc.j.utc_offset_seconds * 1000;
@@ -1176,9 +1176,10 @@ function locFromHash() {
   if (!isFinite(lat) || !isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
   return { name: h.get('name') || lat.toFixed(2) + ', ' + lon.toFixed(2), lat, lon };
 }
-// #...&tab=now or &tab=map opens on that tab (a bookmark for a phone's home screen).
-const hashTab = /(?:^|[#&])tab=(now|map)(?:&|$)/.exec(location.hash);
-if (hashTab) state.tab = hashTab[1];
+// #...&tab=forecast or &tab=map opens on that tab (a bookmark for a phone's home screen).
+// The Forecast tab was called Now until 0.7.1, so &tab=now still opens it; 'now' is its name inside.
+const hashTab = /(?:^|[#&])tab=(now|forecast|map)(?:&|$)/.exec(location.hash);
+if (hashTab) state.tab = hashTab[1] === 'map' ? 'map' : 'now';
 // ...&radar=na or &radar=world and &alerts=1 or 0 choose the map's overlays the same way.
 const hashMap = new URLSearchParams(location.hash.slice(1));
 if (/^(na|world)$/.test(hashMap.get('radar') || '')) mapState.src = hashMap.get('radar');
