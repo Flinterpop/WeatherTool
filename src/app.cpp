@@ -45,7 +45,7 @@ enum : int {
     IDM_DAYCLEAR = 170,                                // Esc: back to the next 48 hours
     IDC_LIST = 200, IDC_ADD, IDC_REMOVE, IDC_UPDATE, IDC_UNITS,
     IDC_VIEW0 = 210, IDC_RANGE0 = 220, IDC_MEASURE0 = 230, IDC_MONTH0 = 240, IDC_TAB0 = 250,
-    IDC_RADAR = 260, IDC_PREV, IDC_PLAY, IDC_NEXT, IDC_ZOOMOUT, IDC_ZOOMIN, IDC_WORLD, IDC_NAMERICA, IDC_ALERTS,
+    IDC_RADAR = 260, IDC_PREV, IDC_PLAY, IDC_NEXT, IDC_ZOOMOUT, IDC_ZOOMIN, IDC_WORLD, IDC_NAMERICA, IDC_ALERTS, IDC_SATELLITE,
 };
 
 constexpr UINT_PTR kUpdateTimer   = 1;
@@ -388,7 +388,7 @@ LRESULT App::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == kForecastTimer) { ScheduleForecasts(false); }
         if (wp == kFramesTimer && MapTab() && tilesOk_) {
             framesAsked_ = UnixNow();
-            tiles_.RequestFrames(RadarSource());
+            tiles_.RequestFrames(RadarSource(), cfg_.state.satellite);
         }
         if (wp == kAnimTimer) { StepFrame(+1); }
         if (wp == kAgoTimer && MapTab()) { InvalidateRect(hwnd_, &agoRect_, FALSE); }   // "N minutes ago" moves on
@@ -709,6 +709,7 @@ void App::CreateControls() {
     hWorld_   = button(L"World", IDC_WORLD, true);
     hNAmerica_ = button(L"N. America", IDC_NAMERICA, true);
     hAlerts_  = button(L"Alerts", IDC_ALERTS, true);
+    hSatellite_ = button(L"Satellite", IDC_SATELLITE, true);
 }
 
 void App::Layout() {
@@ -752,7 +753,7 @@ void App::Layout() {
     }
     // At the right, leftwards: zoom in, zoom out, then Alerts and the radar source pair.
     struct Right { HWND h; int w; int after; };   // `after`: extra space to its left
-    const Right mapRight[] = { { hZoomIn_, 36, 0 }, { hZoomOut_, 36, 12 }, { hAlerts_, kMapBtnW, 12 },
+    const Right mapRight[] = { { hZoomIn_, 36, 0 }, { hZoomOut_, 36, 12 }, { hAlerts_, kMapBtnW, 0 }, { hSatellite_, 72, 12 },
                                { hNAmerica_, 84, 0 }, { hWorld_, kMapBtnW, 0 } };
     int rx = r0;
     for (const Right& b : mapRight) {
@@ -828,6 +829,7 @@ void App::SyncControls() {
     EnableWindow(hWorld_, s.radar);
     EnableWindow(hNAmerica_, s.radar);
     SetCheck(hAlerts_, s.alerts);
+    SetCheck(hSatellite_, s.satellite);
     SetCheck(hPlay_, playing_);
     const bool frames = s.radar && frames_.count > 1;
     EnableWindow(hPrev_, frames);
@@ -873,7 +875,7 @@ void App::ApplyTheme() {
     for (HWND h : hRanges_) { SetWindowTheme(h, sub, nullptr); }
     for (HWND h : hMeasures_) { SetWindowTheme(h, sub, nullptr); }
     for (HWND h : hMonths_) { SetWindowTheme(h, sub, nullptr); }
-    HWND mapButtons[] = { hRadar_, hPrev_, hPlay_, hNext_, hZoomOut_, hZoomIn_, hWorld_, hNAmerica_, hAlerts_ };
+    HWND mapButtons[] = { hRadar_, hPrev_, hPlay_, hNext_, hZoomOut_, hZoomIn_, hWorld_, hNAmerica_, hAlerts_, hSatellite_ };
     for (HWND h : mapButtons) { SetWindowTheme(h, sub, nullptr); }
     RedrawWindow(hwnd_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
 }
@@ -1165,7 +1167,7 @@ void App::SetTab(int tab) {
         if (!cfg_.state.hasMap && cfg_.state.selected < cfg_.locCount) { CenterMapOn(cfg_.state.selected); }
         if (tilesOk_ && UnixNow() - framesAsked_ > kFramesStale) {
             framesAsked_ = UnixNow();
-            tiles_.RequestFrames(RadarSource());
+            tiles_.RequestFrames(RadarSource(), cfg_.state.satellite);
         }
     }
     SyncControls();
@@ -1232,13 +1234,22 @@ void App::OnCommand(int id, int code) {
             framesError_.clear();
             if (tilesOk_) {
                 framesAsked_ = UnixNow();
-                tiles_.RequestFrames(RadarSource());
+                tiles_.RequestFrames(RadarSource(), cfg_.state.satellite);
             }
         }
         SyncControls();
         InvalidateMap();
         return;
     }
+    case IDC_SATELLITE:
+        cfg_.state.satellite = !cfg_.state.satellite;
+        if (cfg_.state.satellite && frames_.satLatest == 0 && tilesOk_) {   // its newest picture is not known yet
+            framesAsked_ = UnixNow();
+            tiles_.RequestFrames(RadarSource(), true);
+        }
+        SyncControls();
+        InvalidateMap();
+        return;
     case IDC_ALERTS:
         cfg_.state.alerts = !cfg_.state.alerts;
         SyncControls();
@@ -1337,8 +1348,8 @@ void App::OnCommand(int id, int code) {
             L"Weather data by Open-Meteo.com, licensed CC BY 4.0. History: ERA5 and ERA5-Land reanalysis from the "
             L"Copernicus Climate Change Service. Forecast: Open-Meteo's forecast from national weather services' models. "
             L"Map: © OpenStreetMap contributors (openstreetmap.org/copyright); world radar: weather data by RainViewer "
-            L"(rainviewer.com); North American radar and weather alerts: Data Source: Environment and Climate Change "
-            L"Canada, under the Environment and Climate Change Canada Data Services End-use Licence "
+            L"(rainviewer.com); North American radar, weather alerts and satellite pictures: Data Source: Environment and "
+            L"Climate Change Canada (the satellite pictures from NOAA's GOES-East and GOES-West), under the Environment and Climate Change Canada Data Services End-use Licence "
             L"(eccc-msc.github.io/open-data/licence). "
             L"Values describe a model grid cell, not a weather station; snowfall in particular can differ from a "
             L"local gauge.\n\nData folder:\n" + cfg_.dir +
@@ -1472,7 +1483,7 @@ void App::OnDpiChanged(WPARAM wp, LPARAM lp) {
     for (HWND h : hRanges_) { setFont(h); }
     for (HWND h : hMeasures_) { setFont(h); }
     for (HWND h : hMonths_) { setFont(h); }
-    HWND mapButtons[] = { hRadar_, hPrev_, hPlay_, hNext_, hZoomOut_, hZoomIn_, hWorld_, hNAmerica_, hAlerts_ };
+    HWND mapButtons[] = { hRadar_, hPrev_, hPlay_, hNext_, hZoomOut_, hZoomIn_, hWorld_, hNAmerica_, hAlerts_, hSatellite_ };
     for (HWND h : mapButtons) { setFont(h); }
     SendMessageW(hList_, LB_SETITEMHEIGHT, 0, Px(kItemH));
     const RECT* r = reinterpret_cast<const RECT*>(lp);
@@ -2268,8 +2279,10 @@ void App::InvalidateMap() {
 void App::PaintRadarAge(Graphics& g) {
     const RectF r = ToRectF(agoRect_);
     if (r.Width <= 0.0f || !cfg_.state.radar || frames_.count == 0 || frame_ >= frames_.count) { return; }
-    const std::wstring t = L"Radar picture from " + AgoText(UnixNow() - frames_.frame[frame_].time);
+    const std::wstring ago = AgoText(UnixNow() - frames_.frame[frame_].time);
     const Font f = UiFont(10.0f, scale_);
+    std::wstring t = L"Radar picture from " + ago;
+    if (TextW(g, t, f) > r.Width) { t = ago; }   // a narrow window: just "1 hour 10 minutes ago"
     DrawTextClip(g, t, f, theme_->textSecondary, RectF(r.X, r.Y + (r.Height - FontPx(10.0f, scale_) * 1.35f) / 2.0f, r.Width, r.Height));
 }
 
@@ -2330,6 +2343,7 @@ void App::PaintMap(Graphics& g) {
         }
     }
 
+    if (cfg_.state.satellite && frames_.satLatest > 0) { PaintSatellite(g, r, ox, oy); }
     if (cfg_.state.alerts) { PaintAlerts(g, r, ox, oy); }
     if (cfg_.state.radar && frames_.count > 0) { PaintRadar(g, r, ox, oy); }
     PaintMarkers(g, r, ox, oy);
@@ -2385,6 +2399,43 @@ void App::PaintRadar(Graphics& g, const RectF& r, double ox, double oy) {
         if (playing_) { (void)tiles_.Get(key(next, x, y), url(next, x, y), true); }
         if (b != nullptr) {
             g.DrawImage(b, dest, 0, 0, static_cast<REAL>(b->GetWidth()), static_cast<REAL>(b->GetHeight()), UnitPixel, &see);
+        }
+    });
+}
+
+// The satellite picture taken with the radar picture shown (or the newest,
+// with the radar off). Nearly opaque: the map shows through only faintly.
+int64_t App::SatTime(size_t frame) const {
+    assert(frames_.satLatest > 0);
+    if (!cfg_.state.radar || frame >= frames_.count) { return frames_.satLatest; }
+    return radar::SatTimeFor(frames_.frame[frame].time, frames_.satLatest);
+}
+
+void App::PaintSatellite(Graphics& g, const RectF& r, double ox, double oy) {
+    const int z = cfg_.state.mapZoom;
+    const int zr = std::max(0, std::min(z - 1, radar::kMscMaxZoom));
+    ImageAttributes see;
+    ColorMatrix am = { { { 1, 0, 0, 0, 0 }, { 0, 1, 0, 0, 0 }, { 0, 0, 1, 0, 0 }, { 0, 0, 0, 0.85f, 0 }, { 0, 0, 0, 0, 1 } } };
+    if (theme_->dark) {   // dimmed like the base map
+        for (int k = 0; k < 3; ++k) { am.m[k][k] = 0.7f; }
+    }
+    see.SetColorMatrix(&am);
+    const int64_t now = SatTime(frame_);
+    const int64_t next = playing_ && frames_.count > 0 ? SatTime((frame_ + 1) % frames_.count) : now;
+    auto key = [&](int64_t t, radar::MscLayer which, int x, int y) {
+        return L"radar_" + std::to_wstring(t) + (which == radar::MscLayer::SatEast ? L"_se" : L"_sw") + std::to_wstring(zr) + L"_" +
+               std::to_wstring(x) + L"_" + std::to_wstring(y);
+    };
+    const double T = slippy::kTile * static_cast<double>(scale_);
+    ForOverlayTiles(r, ox, oy, T, z, zr, [&](int x, int y, const RectF& dest) {
+        radar::MscLayer which{};
+        if (!radar::SatFor(zr, x, y, which)) { return; }
+        Bitmap* b = tiles_.Get(key(now, which, x, y), radar::MscTileUrl(which, now, zr, x, y), true);
+        if (b == nullptr) { b = tiles_.Peek(key(now - radar::kSatStep, which, x, y)); }   // still loading: the one before
+        if (next != now) { (void)tiles_.Get(key(next, which, x, y), radar::MscTileUrl(which, next, zr, x, y), true); }
+        if (b != nullptr) {   // half a pixel over, as the base map does, or the seams show through
+            const RectF over(dest.X, dest.Y, dest.Width + 0.5f, dest.Height + 0.5f);
+            g.DrawImage(b, over, 0, 0, static_cast<REAL>(b->GetWidth()), static_cast<REAL>(b->GetHeight()), UnitPixel, &see);
         }
     });
 }
@@ -2483,6 +2534,18 @@ void App::PaintMapOverlays(Graphics& g, const RectF& r) {
         if (frames_.source == radar::Source::NorthAmerica) { t += L" · North America only"; }
         if (cfg_.state.mapZoom - 1 > radar::MaxZoom(frames_.source)) { t += L" · coarser than the map at this zoom"; }
     }
+    if (cfg_.state.satellite) {
+        if (frames_.satLatest <= 0) {
+            t += L" · loading satellite…";
+        } else {
+            tm l{};
+            const __time64_t st = SatTime(frame_);
+            _localtime64_s(&l, &st);
+            std::array<wchar_t, 48> b{};
+            swprintf_s(b.data(), b.size(), L" · satellite %02d:%02d", l.tm_hour, l.tm_min);
+            t += b.data();
+        }
+    }
     const RectF top = box(t, fb, r.X + 8.0f * s, r.Y + 8.0f * s, false);
 
     // Bottom right: the credits (OpenStreetMap, RainViewer and ECCC all require them on the map).
@@ -2528,8 +2591,9 @@ void App::PaintMapOverlays(Graphics& g, const RectF& r) {
 std::wstring App::MapCredit() const {
     std::wstring t = kCreditOsm;
     if (cfg_.state.radar && RadarSource() == radar::Source::World) { t += L" · " + std::wstring(kCreditRv); }
-    if ((cfg_.state.radar && RadarSource() == radar::Source::NorthAmerica) || cfg_.state.alerts) {
+    if ((cfg_.state.radar && RadarSource() == radar::Source::NorthAmerica) || cfg_.state.alerts || cfg_.state.satellite) {
         t += L" · " + std::wstring(kCreditMsc);
+        if (cfg_.state.satellite) { t += L" and NOAA (GOES satellites)"; }   // the licence asks to name a third-party contributor
     }
     return t;
 }

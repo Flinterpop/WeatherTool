@@ -146,11 +146,12 @@ void TileStore::Evict() {
     }
 }
 
-void TileStore::RequestFrames(radar::Source source) {
+void TileStore::RequestFrames(radar::Source source, bool satellite) {
     {
         std::lock_guard<std::mutex> lock(mu_);
         framesWanted_ = true;
         framesSource_ = source;
+        framesSat_ = satellite;
         missing_.clear();   // a tile that failed earlier gets another chance
     }
     cv_.notify_one();
@@ -223,6 +224,7 @@ void TileStore::Run() {
         Job job;
         bool frames = false;
         radar::Source source = radar::Source::World;
+        bool sat = false;
         {
             std::unique_lock<std::mutex> lock(mu_);
             cv_.wait(lock, [this] { return stop_ || framesWanted_ || !jobs_.empty(); });
@@ -231,6 +233,7 @@ void TileStore::Run() {
                 framesWanted_ = false;
                 frames = true;
                 source = framesSource_;
+                sat = framesSat_;
             } else {
                 job = std::move(jobs_.back());   // newest first: what is on screen now
                 jobs_.pop_back();
@@ -252,6 +255,14 @@ void TileStore::Run() {
             const std::string_view body(buf.get(), got ? hr.length : 0);
             const bool ok = got && (msc ? radar::ParseMscTimes(body, f, err) : radar::ParseFrames(body, f, err));
             if (err.empty() && !ok) { err = (msc ? L"GeoMet" : L"RainViewer") + std::wstring(L" answered HTTP ") + std::to_wstring(hr.status); }
+            if (ok && sat) {   // the satellite's newest picture; without it the satellite is simply not drawn
+                HttpResult sr;
+                std::wstring serr;
+                if (http.Get(radar::kSatCapsUrl, buf.get(), 256 * 1024, sr, serr) && sr.status == 200) {
+                    const int64_t t = radar::MscLatest(std::string_view(buf.get(), sr.length));
+                    f.satLatest = t > 0 ? t : 0;
+                }
+            }
             {
                 std::lock_guard<std::mutex> lock(mu_);
                 if (framesWanted_ && framesSource_ != source) { continue; }   // the source changed meanwhile: that list is wanted now

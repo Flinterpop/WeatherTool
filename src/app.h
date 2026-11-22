@@ -55,6 +55,8 @@ private:
     void PaintRadarAge(Gdiplus::Graphics& g);
     void PaintRadar(Gdiplus::Graphics& g, const Gdiplus::RectF& r, double ox, double oy);
     void PaintAlerts(Gdiplus::Graphics& g, const Gdiplus::RectF& r, double ox, double oy);
+    void PaintSatellite(Gdiplus::Graphics& g, const Gdiplus::RectF& r, double ox, double oy);
+    int64_t SatTime(size_t frame) const;   // the satellite picture shown with radar frame `frame`
     void PaintPrecipTypeKey(Gdiplus::Graphics& g, const Gdiplus::RectF& r);
     void PaintAlertsKey(Gdiplus::Graphics& g, Gdiplus::REAL y, const Gdiplus::RectF& r);
     std::wstring MapCredit() const;
@@ -153,6 +155,7 @@ private:
     HWND      hWorld_ = nullptr;     // radar source: RainViewer (world) or GeoMet (North America)
     HWND      hNAmerica_ = nullptr;
     HWND      hAlerts_ = nullptr;    // MSC weather alerts on/off
+    HWND      hSatellite_ = nullptr; // GOES satellite pictures on/off
     std::array<HWND, kViewCount> hViews_{};
     std::array<HWND, kRangeYears.size()> hRanges_{};
     std::array<HWND, 3> hMeasures_{};

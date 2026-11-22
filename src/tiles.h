@@ -45,7 +45,7 @@ public:
     Gdiplus::Bitmap* Peek(const std::wstring& key);   // cached only, never queues
     void TakeDone();                                    // on WM_APP_TILES
 
-    void RequestFrames(radar::Source source);           // the radar frame list
+    void RequestFrames(radar::Source source, bool satellite);   // the radar frame list (+ the satellite's latest)
     bool TakeFrames(radar::Frames& out, std::wstring& err);
 
     size_t Queued() const;
@@ -89,6 +89,7 @@ private:
     bool                    posted_ = false;
     bool                    framesWanted_ = false;
     radar::Source           framesSource_ = radar::Source::World;
+    bool                    framesSat_ = false;
     bool                    framesReady_ = false;
     radar::Frames           frames_;
     std::wstring            framesErr_;

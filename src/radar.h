@@ -17,7 +17,9 @@
 // outside the layer's own bounding box. The radar layer is the 1 km North
 // American composite of surface precipitation type (rain, snow, mixed,
 // freezing rain, each light to heavy), the last 3 hours; the alerts layer has
-// no time and shows the alerts in effect.
+// no time and shows the alerts in effect. Satellite: NOAA's GOES-East and
+// GOES-West "Day Visible / Night IR" 1 km pictures as GeoMet serves them,
+// every 10 minutes; each tile comes from the satellite that sees it better.
 #pragma once
 
 #include <array>
@@ -38,6 +40,9 @@ constexpr wchar_t kMscCapsUrl[] =
     L"https://geo.weather.gc.ca/geomet?service=WMS&version=1.3.0&request=GetCapabilities&layer=Radar_1km_SfcPrecipType";
 constexpr int     kMscMaxZoom  = 8;      // the radar is 1 km: closer than this, tiles are only scaled up
 constexpr int64_t kMscStep     = 720;    // seconds between frames shown (the layer has one every 6 minutes)
+constexpr wchar_t kSatCapsUrl[] =
+    L"https://geo.weather.gc.ca/geomet?service=WMS&version=1.3.0&request=GetCapabilities&layer=GOES-East_1km_DayVis-NightIR";
+constexpr int64_t kSatStep     = 600;    // the satellite layers have a picture every 10 minutes
 
 struct Frame {
     int64_t      time = 0;   // Unix time of the radar picture
@@ -49,6 +54,7 @@ struct Frames {
     std::wstring host;       // RainViewer: "https://tilecache.rainviewer.com"; GeoMet: empty
     std::array<Frame, kMaxFrames> frame{};
     size_t count = 0;        // oldest first
+    int64_t satLatest = 0;   // the newest satellite picture, 0 when not asked for or not known
 };
 
 // The highest radar tile zoom the source serves.
@@ -70,13 +76,24 @@ bool ParseMscTimes(std::string_view xml, Frames& out, std::wstring& error);
 int64_t ParseIsoUtc(std::string_view s);
 std::wstring IsoUtc(int64_t t);
 
-enum class MscLayer { Radar, Alerts };
+// The newest time a GeoMet layer's GetCapabilities lists; -1 when none.
+int64_t MscLatest(std::string_view xml);
+
+enum class MscLayer { Radar, Alerts, SatEast, SatWest };
 
 // A 512 px GetMap of one Web Mercator tile (z, x, y) of the layer; `time` is
-// the radar frame (ignored for alerts).
+// the picture's (ignored for alerts).
 std::wstring MscTileUrl(MscLayer layer, int64_t time, int z, int x, int y);
 
 // Whether the tile touches the layer's bounding box (no request otherwise).
 bool MscCovers(MscLayer layer, int z, int x, int y);
+
+// Which satellite to ask for the tile: GOES-East east of 106°W, GOES-West
+// west of it, each within its own view. False when neither sees the tile.
+bool SatFor(int z, int x, int y, MscLayer& out);
+
+// The satellite picture to show with a radar picture taken at `t`: the
+// newest at or before it, but none newer than `latest`.
+int64_t SatTimeFor(int64_t t, int64_t latest);
 
 } // namespace wt::radar

@@ -177,6 +177,7 @@ bool LoadConfig(const std::wstring& dir, Config& cfg, std::wstring& err) {
     s.radar    = ReadInt(cfg, L"state", L"radar", 1) != 0;
     s.radarSrc = Clamp(ReadInt(cfg, L"state", L"radarSource", 0), 0, 1);
     s.alerts   = ReadInt(cfg, L"state", L"alerts", 0) != 0;
+    s.satellite = ReadInt(cfg, L"state", L"satellite", 0) != 0;
     const std::wstring mlat = ReadStr(cfg, L"state", L"mapLat", L"");
     const std::wstring mlon = ReadStr(cfg, L"state", L"mapLon", L"");
     if (!mlat.empty() && !mlon.empty()) {
@@ -243,7 +244,8 @@ bool SaveState(const Config& cfg, std::wstring& err) {
               WriteStr(cfg, L"state", L"mapZoom", std::to_wstring(s.mapZoom), err) &&
               WriteStr(cfg, L"state", L"radar", s.radar ? L"1" : L"0", err) &&
               WriteStr(cfg, L"state", L"radarSource", std::to_wstring(s.radarSrc), err) &&
-              WriteStr(cfg, L"state", L"alerts", s.alerts ? L"1" : L"0", err);
+              WriteStr(cfg, L"state", L"alerts", s.alerts ? L"1" : L"0", err) &&
+              WriteStr(cfg, L"state", L"satellite", s.satellite ? L"1" : L"0", err);
     if (ok && s.hasMap) {
         std::array<wchar_t, 32> la{}, lo{};
         swprintf_s(la.data(), la.size(), L"%.5f", s.mapLat);

@@ -32,6 +32,7 @@ struct ViewState {
     bool   radar     = true;  // the radar overlay is on
     int    radarSrc  = 0;     // radar::Source: 0 world (RainViewer), 1 North America (MSC GeoMet)
     bool   alerts    = false; // MSC's weather alerts (Canada) under the radar
+    bool   satellite = false; // GOES satellite pictures over the base map
     int    view      = 0;     // View
     int    month     = 0;     // 0..11, for View::Month
     int    measure   = 0;     // Var::Mean / High / Low

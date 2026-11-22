@@ -175,6 +175,7 @@ bool ParseMscTimes(std::string_view xml, Frames& out, std::wstring& error) {
 
 bool MscCovers(MscLayer layer, int z, int x, int y) {
     assert(z >= 0 && z <= 20);
+    assert(layer == MscLayer::Radar || layer == MscLayer::Alerts);   // the satellites: SatFor
     const Box& b = layer == MscLayer::Radar ? kRadarBox : kAlertsBox;
     const double n = static_cast<double>(1 << z);
     const double w = x / n * 360.0 - 180.0;
@@ -195,12 +196,43 @@ std::wstring MscTileUrl(MscLayer layer, int64_t time, int z, int x, int y) {
     std::wstring u = L"https://geo.weather.gc.ca/geomet?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&FORMAT=image/png"
                      L"&TRANSPARENT=TRUE&CRS=EPSG:3857&WIDTH=512&HEIGHT=512&BBOX=";
     u += bbox.data();
-    if (layer == MscLayer::Radar) {
-        u += L"&LAYERS=Radar_1km_SfcPrecipType&STYLES=SfcPrecipType_Dis&TIME=" + IsoUtc(time);
-    } else {
-        u += L"&LAYERS=Current-Alerts&STYLES=Current-Alerts";
+    switch (layer) {
+    case MscLayer::Radar:   u += L"&LAYERS=Radar_1km_SfcPrecipType&STYLES=SfcPrecipType_Dis&TIME=" + IsoUtc(time); break;
+    case MscLayer::Alerts:  u += L"&LAYERS=Current-Alerts&STYLES=Current-Alerts"; break;
+    case MscLayer::SatEast: u += L"&LAYERS=GOES-East_1km_DayVis-NightIR&STYLES=&TIME=" + IsoUtc(time); break;
+    case MscLayer::SatWest: u += L"&LAYERS=GOES-West_1km_DayVis-NightIR&STYLES=&TIME=" + IsoUtc(time); break;
     }
     return u;
+}
+
+int64_t MscLatest(std::string_view xml) {
+    Frames f;
+    std::wstring err;
+    return ParseMscTimes(xml, f, err) ? f.frame[f.count - 1].time : -1;
+}
+
+bool SatFor(int z, int x, int y, MscLayer& out) {
+    assert(z >= 0 && z <= 20);
+    const double n = static_cast<double>(1 << z);
+    const double lon = (x + 0.5) / n * 360.0 - 180.0;   // the tile's centre
+    const double lat = std::atan(std::sinh(3.14159265358979323846 * (1.0 - 2.0 * (y + 0.5) / n))) * 180.0 / 3.14159265358979323846;
+    if (std::fabs(lat) > 81.0) { return false; }        // beyond the edge of a geostationary view
+    // GeoMet's boxes: East -152.8..2.8, West -214.8..-59.2 (that is, 145.2 east round to 59.2 west).
+    if (lon >= -106.0 && lon <= 2.8) {
+        out = MscLayer::SatEast;
+        return true;
+    }
+    if (lon < -106.0 || lon >= 145.2) {
+        out = MscLayer::SatWest;
+        return true;
+    }
+    return false;
+}
+
+int64_t SatTimeFor(int64_t t, int64_t latest) {
+    assert(t >= 0 && latest >= 0);
+    const int64_t at = t / kSatStep * kSatStep;
+    return at < latest ? at : latest;
 }
 
 } // namespace wt::radar

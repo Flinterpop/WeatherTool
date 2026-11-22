@@ -80,6 +80,8 @@ th { color: var(--text-secondary); font-weight: 600; }
 #mapBox img { position: absolute; display: block; pointer-events: none; -webkit-user-drag: none; }
 #mapBox img.radar { opacity: .8; }
 #mapBox img.alerts { opacity: .45; }
+#mapBox img.sat { opacity: .85; }
+@media (prefers-color-scheme: dark) { #mapBox img.sat { filter: brightness(.7); } }
 @media (prefers-color-scheme: dark) { #mapBox img.base { filter: brightness(.6); } }
 .mapnote { position: absolute; background: var(--surface-1); border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; font-size: 12px; color: var(--text-primary); z-index: 3; }
 .mapnote a { color: inherit; }
@@ -132,11 +134,12 @@ footer a { color: inherit; }
       <span id="mAgo" style="color:var(--text-secondary);margin-left:6px"></span>
       <span style="margin-left:auto"></span>
       <span class="seg"><button id="mWorld" title="Radar from RainViewer, worldwide">World</button><button id="mNA" title="Radar from Environment and Climate Change Canada: rain, snow, mixed and freezing rain, Canada and the US">N. America</button></span>
+      <button id="mSat" title="Satellite pictures (GOES-East and GOES-West, by day visible, by night infrared), via Environment and Climate Change Canada">Satellite</button>
       <button id="mAlerts" title="Weather alerts in effect, from Environment and Climate Change Canada">Alerts</button>
       <button id="mOut" title="Zoom out">−</button><button id="mIn" title="Zoom in">+</button>
     </div>
     <div id="mapBox"></div>
-    <footer>Drag to move, scroll or pinch to zoom. World radar: the past 2 hours in 10-minute pictures, from RainViewer (free for personal use, regional detail only). N. America radar and Alerts: the past 3 hours in 12-minute pictures and the alerts in effect, Data Source: Environment and Climate Change Canada (<a href="https://eccc-msc.github.io/open-data/licence/readme_en/" target="_blank" rel="noopener">licence</a>).</footer>
+    <footer>Drag to move, scroll or pinch to zoom. World radar: the past 2 hours in 10-minute pictures, from RainViewer (free for personal use, regional detail only). N. America radar and Alerts: the past 3 hours in 12-minute pictures and the alerts in effect; Satellite: NOAA's GOES-East and GOES-West pictures every 10 minutes, matched to the radar picture shown. Data Source: Environment and Climate Change Canada (<a href="https://eccc-msc.github.io/open-data/licence/readme_en/" target="_blank" rel="noopener">licence</a>).</footer>
   </div>
   <div id="app" hidden>
     <div class="tiles" id="tiles"></div>
@@ -858,8 +861,8 @@ const latToY = (lat, z) => { const c = Math.max(-85.0511, Math.min(85.0511, lat)
   return (1 - Math.log(Math.tan(c) + 1 / Math.cos(c)) / Math.PI) / 2 * TILE * 2 ** z; };
 const xToLon = (x, z) => x / (TILE * 2 ** z) * 360 - 180;
 const yToLat = (y, z) => 180 / Math.PI * Math.atan(Math.sinh(Math.PI - 2 * Math.PI * y / (TILE * 2 ** z)));
-const mapState = Object.assign({ lat: null, lon: null, z: 6, radar: true, src: 'world', alerts: false }, load('wh.map') || {});
-const radarState = { src: '', host: '', frames: [], i: 0, asked: 0, error: '', playing: 0, hold: 0 };
+const mapState = Object.assign({ lat: null, lon: null, z: 6, radar: true, src: 'world', alerts: false, sat: false }, load('wh.map') || {});
+const radarState = { src: '', host: '', frames: [], i: 0, asked: 0, error: '', playing: 0, hold: 0, satLatest: 0 };
 
 // North America: the Meteorological Service of Canada's GeoMet WMS (as the desktop app's radar.cpp).
 // Its usage policy: a meaningful client, no bulk tile retrieval, contact above ~1 request a second
@@ -875,9 +878,20 @@ function mscUrl(layer, time, z, x, y) {
   const s = 2 * HALF / 2 ** z, minx = -HALF + x * s, maxy = HALF - y * s;
   return MSC + '?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&FORMAT=image/png&TRANSPARENT=TRUE&CRS=EPSG:3857&WIDTH=512&HEIGHT=512&BBOX=' +
     [minx, maxy - s, minx + s, maxy].map(v => v.toFixed(2)).join(',') +
-    (layer === 'radar' ? '&LAYERS=Radar_1km_SfcPrecipType&STYLES=SfcPrecipType_Dis&TIME=' + new Date(time * 1000).toISOString().replace('.000', '')
-                       : '&LAYERS=Current-Alerts&STYLES=Current-Alerts&SLOT=' + time);
+    (layer === 'alerts' ? '&LAYERS=Current-Alerts&STYLES=Current-Alerts&SLOT=' + time
+      : (layer === 'radar' ? '&LAYERS=Radar_1km_SfcPrecipType&STYLES=SfcPrecipType_Dis'
+                           : '&LAYERS=GOES-' + (layer === 'satEast' ? 'East' : 'West') + '_1km_DayVis-NightIR&STYLES=') +
+        '&TIME=' + new Date(time * 1000).toISOString().replace('.000', ''));
 }
+// Satellite: GOES-East east of 106°W, GOES-West west of it, each within its view (as radar.cpp's SatFor).
+function satFor(z, x, y) {
+  const n = 2 ** z, lon = (x + 0.5) / n * 360 - 180, lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + 0.5) / n))) * 180 / Math.PI;
+  if (Math.abs(lat) > 81) return '';
+  if (lon >= -106 && lon <= 2.8) return 'satEast';
+  return lon < -106 || lon >= 145.2 ? 'satWest' : '';
+}
+// The satellite picture shown with a radar picture: the newest at or before it, none newer than there is.
+const satTimeFor = t => Math.min(Math.floor(t / 600) * 600, radarState.satLatest);
 // The radar layer's time dimension ("start/end/PT6M" or a comma list) as frames MSC_STEP apart.
 function mscFrames(xml) {
   const m = /<Dimension name="time"[^>]*>([^<]*)</.exec(xml);
@@ -911,6 +925,12 @@ async function loadFrames() {
       const past = (j.radar && j.radar.past) || [];
       if (!/^https:\/\//.test(j.host || '') || !past.length) throw new Error('no radar frames');
       host = j.host; frames = past.slice(-16);
+    }
+    if (mapState.sat) {   // the satellite's newest picture; without it the satellite is simply not drawn
+      try {
+        const r = await fetch(MSC + '?service=WMS&version=1.3.0&request=GetCapabilities&layer=GOES-East_1km_DayVis-NightIR');
+        if (r.ok) { const f = mscFrames(await r.text()); radarState.satLatest = f[f.length - 1].time; }
+      } catch (e) { /* no satellite this time */ }
     }
     if (src !== mapState.src) return;   // the source changed meanwhile
     const atLatest = radarState.src !== src || !radarState.frames.length || radarState.i >= radarState.frames.length - 1;
@@ -965,11 +985,13 @@ function renderMap() {
       }
     }
   };
+  const rs = radarState, f = rs.src === mapState.src ? rs.frames[rs.i] : null, na = mapState.src === 'na';
+  const satT = mapState.sat && rs.satLatest ? (mapState.radar && f ? satTimeFor(f.time) : rs.satLatest) : 0;
+  if (satT) overlay('sat', MSC_MAXZ, (zr, x, y) => { const s = satFor(zr, x, y); return s ? mscUrl(s, satT, zr, x, y) : ''; });
   if (mapState.alerts) {   // the alerts in effect: asked for again every 10 minutes
     const slot = Math.floor(Date.now() / 600e3) * 600;
     overlay('alerts', MSC_MAXZ, (zr, x, y) => mscCovers('alerts', zr, x, y) ? mscUrl('alerts', slot, zr, x, y) : '');
   }
-  const rs = radarState, f = rs.src === mapState.src ? rs.frames[rs.i] : null, na = mapState.src === 'na';
   if (mapState.radar && f) {
     if (na) overlay('radar', MSC_MAXZ, (zr, x, y) => mscCovers('radar', zr, x, y) ? mscUrl('radar', f.time, zr, x, y) : '');
     else overlay('radar', RADAR_MAXZ, (zr, x, y) => rs.host + f.path + '/512/' + zr + '/' + x + '/' + y + '/2/1_1.png');
@@ -992,15 +1014,18 @@ function renderMap() {
     }
   }
   const sw = cs => cs.map(c => '<i class="sw2" style="background:' + c + '"></i>').join('');
+  if (mapState.sat) label += satT ? ' · satellite ' + new Date(satT * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                                  : ' · loading satellite…';
   html.push('<div class="mapnote" style="left:8px;top:8px;font-weight:600">' + esc(label) + '</div>');
   if (mapState.alerts) {
     html.push('<div class="mapnote" style="left:8px;top:34px">Alerts ' + sw(['#ffff00', '#ffa500', '#ff0000']) + ' yellow, orange, red &nbsp;' +
       sw(['#d3d3d3']) + ' statement</div>');
   }
-  const eccc = (mapState.radar && na) || mapState.alerts;
+  const eccc = (mapState.radar && na) || mapState.alerts || mapState.sat;
   html.push('<div class="mapnote" style="right:4px;bottom:4px">© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors' +
     (mapState.radar && !na ? ' · Weather data by <a href="https://www.rainviewer.com/" target="_blank" rel="noopener">RainViewer</a>' : '') +
-    (eccc ? ' · Data Source: <a href="https://eccc-msc.github.io/open-data/licence/readme_en/" target="_blank" rel="noopener">Environment and Climate Change Canada</a>' : '') +
+    (eccc ? ' · Data Source: <a href="https://eccc-msc.github.io/open-data/licence/readme_en/" target="_blank" rel="noopener">Environment and Climate Change Canada</a>' +
+      (mapState.sat ? ' and NOAA (GOES satellites)' : '') : '') +
     '</div>');
   if (mapState.radar) {   // above the credits, which can be as wide as the map on a phone
     if (na) {
@@ -1019,6 +1044,7 @@ function renderMap() {
   $('mWorld').classList.toggle('on', !na); $('mNA').classList.toggle('on', na);
   $('mWorld').disabled = $('mNA').disabled = !mapState.radar;
   $('mAlerts').classList.toggle('on', mapState.alerts);
+  $('mSat').classList.toggle('on', mapState.sat);
   $('mPlay').classList.toggle('on', !!rs.playing);
   for (const id of ['mPrev', 'mPlay', 'mNext']) $(id).disabled = !mapState.radar || rs.frames.length < 2;
   $('mOut').disabled = z <= MINZ; $('mIn').disabled = z >= MAXZ;
@@ -1084,6 +1110,7 @@ function setPlaying(on) {
   };
   $('mWorld').onclick = () => setSrc('world'); $('mNA').onclick = () => setSrc('na');
   $('mAlerts').onclick = () => { mapState.alerts = !mapState.alerts; saveMap(); renderMap(); };
+  $('mSat').onclick = () => { mapState.sat = !mapState.sat; saveMap(); if (mapState.sat && !radarState.satLatest) loadFrames(); renderMap(); };
   $('mPrev').onclick = () => { setPlaying(false); stepFrame(-1); };
   $('mNext').onclick = () => { setPlaying(false); stepFrame(1); };
   $('mPlay').onclick = () => setPlaying(!radarState.playing);
@@ -1180,10 +1207,11 @@ function locFromHash() {
 // The Forecast tab was called Now until 0.7.1, so &tab=now still opens it; 'now' is its name inside.
 const hashTab = /(?:^|[#&])tab=(now|forecast|map)(?:&|$)/.exec(location.hash);
 if (hashTab) state.tab = hashTab[1] === 'map' ? 'map' : 'now';
-// ...&radar=na or &radar=world and &alerts=1 or 0 choose the map's overlays the same way.
+// ...&radar=na or &radar=world, &alerts=1 or 0 and &satellite=1 or 0 choose the map's overlays the same way.
 const hashMap = new URLSearchParams(location.hash.slice(1));
 if (/^(na|world)$/.test(hashMap.get('radar') || '')) mapState.src = hashMap.get('radar');
 if (/^[01]$/.test(hashMap.get('alerts') || '')) mapState.alerts = hashMap.get('alerts') === '1';
+if (/^[01]$/.test(hashMap.get('satellite') || '')) mapState.sat = hashMap.get('satellite') === '1';
 const saved = locFromHash() || load('wh.loc');
 if (saved) loadLocation(saved); else renderAll();
 </script>

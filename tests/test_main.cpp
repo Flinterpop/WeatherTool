@@ -485,6 +485,22 @@ void TestMap() {
     CHECK(radar::MscCovers(radar::MscLayer::Radar, 6, 17, 27) && !radar::MscCovers(radar::MscLayer::Alerts, 6, 17, 27)); // Miami
     CHECK(!radar::MscCovers(radar::MscLayer::Radar, 6, 32, 21));                                                         // Europe
     CHECK(radar::MaxZoom(radar::Source::World) == 7 && radar::MaxZoom(radar::Source::NorthAmerica) == 8);
+
+    // Satellite: the newest picture, which satellite sees a tile, which picture goes with a radar frame.
+    CHECK(radar::MscLatest(R"(<Dimension name="time" units="ISO8601">2026-11-19T20:20:00Z/2026-11-22T02:20:00Z/PT10M</Dimension>)") ==
+          radar::ParseIsoUtc("2026-11-22T02:20:00Z"));
+    CHECK(radar::MscLatest("<nothing/>") == -1);
+    radar::MscLayer which{};
+    CHECK(radar::SatFor(6, 18, 23, which) && which == radar::MscLayer::SatEast);   // Ottawa
+    CHECK(radar::SatFor(6, 10, 22, which) && which == radar::MscLayer::SatWest);   // Vancouver
+    CHECK(radar::SatFor(6, 3, 27, which) && which == radar::MscLayer::SatWest);    // Hawaii
+    CHECK(!radar::SatFor(6, 40, 21, which));                                       // central Asia: neither
+    CHECK(!radar::SatFor(6, 18, 2, which));                                        // the far north: beyond both views
+    const int64_t latest = radar::ParseIsoUtc("2026-11-22T02:20:00Z");
+    CHECK(radar::SatTimeFor(radar::ParseIsoUtc("2026-11-22T01:54:00Z"), latest) == radar::ParseIsoUtc("2026-11-22T01:50:00Z"));
+    CHECK(radar::SatTimeFor(radar::ParseIsoUtc("2026-11-22T02:30:00Z"), latest) == latest);   // never newer than there is
+    CHECK(radar::MscTileUrl(radar::MscLayer::SatWest, latest, 6, 10, 22)
+              .find(L"&LAYERS=GOES-West_1km_DayVis-NightIR&STYLES=&TIME=2026-11-22T02:20:00Z") != std::wstring::npos);
 }
 
 void TestConfig() {
@@ -519,9 +535,10 @@ void TestConfig() {
     CHECK(back.units == Units::Imperial && back.theme == ThemeMode::Dark);
     CHECK(back.state.view == 2 && back.state.selected == 1 && back.state.tab == 1);
     CHECK(!back.state.hasMap && back.state.mapZoom == 6 && back.state.radar);   // map defaults
-    CHECK(back.state.radarSrc == 0 && !back.state.alerts);
+    CHECK(back.state.radarSrc == 0 && !back.state.alerts && !back.state.satellite);
     back.state.radarSrc = 1;
     back.state.alerts = true;
+    back.state.satellite = true;
     back.state.hasMap = true;
     back.state.mapLat = 45.5;
     back.state.mapLon = -73.6;
@@ -532,7 +549,7 @@ void TestConfig() {
     Config mapBack;
     CHECK(LoadConfig(dir, mapBack, err) && mapBack.state.hasMap && Near(mapBack.state.mapLat, 45.5) &&
           Near(mapBack.state.mapLon, -73.6) && mapBack.state.mapZoom == 9 && !mapBack.state.radar && mapBack.state.tab == 2);
-    CHECK(mapBack.state.radarSrc == 1 && mapBack.state.alerts);
+    CHECK(mapBack.state.radarSrc == 1 && mapBack.state.alerts && mapBack.state.satellite);
     CHECK(!back.serverEnabled && back.serverPort == 8765);   // defaults
     back.serverEnabled = true;
     back.serverPort = 9001;
