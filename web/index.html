@@ -78,17 +78,28 @@ th { color: var(--text-secondary); font-weight: 600; }
 .glyph { font-family: "Segoe UI Symbol", "Apple Symbols", system-ui, sans-serif; }
 #mapBox { position: relative; height: 72vh; min-height: 360px; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; margin-top: 10px; background: var(--surface-1); touch-action: none; cursor: grab; user-select: none; }
 #mapBox img { position: absolute; display: block; pointer-events: none; -webkit-user-drag: none; }
-#mapBox img.radar { opacity: .8; }
-#mapBox img.alerts { opacity: .45; }
-#mapBox img.sat { opacity: .85; }
-@media (prefers-color-scheme: dark) { #mapBox img.sat { filter: brightness(.7); } }
-@media (prefers-color-scheme: dark) { #mapBox img.base { filter: brightness(.6); } }
+#mapBox canvas.stand { position: absolute; display: block; pointer-events: none; }
+#mapBox .radar { opacity: .8; }
+#mapBox .alerts { opacity: .45; }
+#mapBox .sat { opacity: .85; }
+@media (prefers-color-scheme: dark) { #mapBox .sat { filter: brightness(.7); } }
+@media (prefers-color-scheme: dark) { #mapBox .base { filter: brightness(.6); } }
 .mapnote { position: absolute; background: var(--surface-1); border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; font-size: 12px; color: var(--text-primary); z-index: 3; }
 .mapnote a { color: inherit; }
 .marker { position: absolute; z-index: 2; transform: translate(-6px, -6px); white-space: nowrap; font-size: 12px; font-weight: 600; }
 .marker i { display: inline-block; width: 12px; height: 12px; border-radius: 50%; background: var(--series-2); border: 2px solid var(--surface-1); box-sizing: border-box; vertical-align: middle; }
 .marker span { background: var(--surface-1); border: 1px solid var(--border); padding: 1px 5px; margin-left: 4px; vertical-align: middle; }
 .sw2 { display: inline-block; width: 14px; height: 9px; vertical-align: middle; }
+.pin { position: absolute; z-index: 2; width: 12px; height: 12px; margin: -8px 0 0 -8px; border: 2px solid #141414; border-radius: 50%; box-shadow: 0 0 0 2px #fff; }
+#alertPanel { position: absolute; top: 18px; right: 8px; width: min(400px, calc(100% - 16px)); max-height: calc(100% - 60px); overflow: auto; z-index: 4;
+  background: var(--surface-1); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; font-size: 13px; box-sizing: border-box; box-shadow: 0 2px 10px rgba(0,0,0,.15); }
+#alertPanel h3 { margin: 0; font-size: 14px; }
+#alertPanel .x { position: absolute; top: 4px; right: 6px; border: 0; background: none; font-size: 18px; padding: 2px 6px; }
+#alertPanel .where, #alertPanel .when { color: var(--text-muted); font-size: 12px; }
+#alertPanel .alert { border-top: 1px solid var(--border); margin-top: 8px; padding-top: 8px; }
+#alertPanel .alert:first-of-type { border-top: 0; }
+#alertPanel .alert b .sw2 { width: 11px; height: 11px; margin-right: 6px; border: 1px solid #5a5a5a; }
+#alertPanel .text { white-space: pre-line; margin-top: 6px; }
 footer { color: var(--text-muted); font-size: 12px; margin-top: 20px; }
 footer a { color: inherit; }
 </style>
@@ -138,8 +149,8 @@ footer a { color: inherit; }
       <button id="mAlerts" title="Weather alerts in effect, from Environment and Climate Change Canada">Alerts</button>
       <button id="mOut" title="Zoom out">−</button><button id="mIn" title="Zoom in">+</button>
     </div>
-    <div id="mapBox"></div>
-    <footer>Drag to move, scroll or pinch to zoom. World radar: the past 2 hours in 10-minute pictures, from RainViewer (free for personal use, regional detail only). N. America radar and Alerts: the past 3 hours in 12-minute pictures and the alerts in effect; Satellite: NOAA's GOES-East and GOES-West pictures every 10 minutes, matched to the radar picture shown. Data Source: Environment and Climate Change Canada (<a href="https://eccc-msc.github.io/open-data/licence/readme_en/" target="_blank" rel="noopener">licence</a>).</footer>
+    <div style="position:relative"><div id="mapBox"></div><div id="alertPanel" hidden></div></div>
+    <footer>Drag to move, scroll or pinch to zoom. With Alerts on, click or tap an area for its alert. World radar: the past 2 hours in 10-minute pictures, from RainViewer (free for personal use, regional detail only). N. America radar and Alerts: the past 3 hours in 12-minute pictures and the alerts in effect; Satellite: NOAA's GOES-East and GOES-West pictures every 10 minutes, matched to the radar picture shown. Data Source: Environment and Climate Change Canada (<a href="https://eccc-msc.github.io/open-data/licence/readme_en/" target="_blank" rel="noopener">licence</a>).</footer>
   </div>
   <div id="app" hidden>
     <div class="tiles" id="tiles"></div>
@@ -883,6 +894,79 @@ function mscUrl(layer, time, z, x, y) {
                            : '&LAYERS=GOES-' + (layer === 'satEast' ? 'East' : 'West') + '_1km_DayVis-NightIR&STYLES=') +
         '&TIME=' + new Date(time * 1000).toISOString().replace('.000', ''));
 }
+// The alerts in effect at a clicked point (as radar.cpp's AlertInfoUrl and ParseAlertInfo): a
+// GetFeatureInfo on a 21 x 21 pixel window about 2 km across, asked about its centre pixel.
+const MAX_ALERTS = 8;
+const alertQ = { open: false, lat: 0, lon: 0, seq: 0, loading: false, error: '', alerts: [], asked: 0 };
+function alertInfoUrl(lat, lon) {
+  const d = 0.01, f = v => v.toFixed(5);
+  return MSC + '?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetFeatureInfo&LAYERS=Current-Alerts&QUERY_LAYERS=Current-Alerts&STYLES=&CRS=EPSG:4326&BBOX=' +
+    [f(lat - d), f(lon - d), f(lat + d), f(lon + d)].join(',') + '&WIDTH=21&HEIGHT=21&I=10&J=10&INFO_FORMAT=application/json&FEATURE_COUNT=' + MAX_ALERTS;
+}
+const alertRank = a => a.colour === 'red' ? 0 : a.colour === 'orange' ? 1 : a.colour === 'yellow' ? 2 : 3;
+function parseAlerts(j) {
+  if (!j || j.type !== 'FeatureCollection' || !Array.isArray(j.features)) throw new Error("GeoMet's answer is not a list of alerts");
+  const out = [];
+  for (const ft of j.features.slice(0, 64)) {
+    const p = ft && ft.properties;
+    if (!p || !p.alert_name_en) continue;
+    const a = { name: p.alert_name_en, colour: p.risk_colour_en || '', area: p.feature_name_en || '', text: p.alert_text_en || '',
+                issued: Date.parse(p.publication_datetime) || 0, ends: Date.parse(p.event_end_datetime) || 0 };
+    if (out.some(o => o.name === a.name && o.area === a.area && o.text === a.text)) continue;   // one alert over two pieces of an area
+    out.push(a);
+  }
+  return out.sort((a, b) => alertRank(a) - alertRank(b)).slice(0, MAX_ALERTS);   // stable: GeoMet's order within a level
+}
+async function askAlertsAt(px, py) {
+  const box = $('mapBox'), z = mapState.z, world = TILE * 2 ** z;
+  const x = ((lonToX(mapState.lon, z) + px - box.clientWidth / 2) % world + world) % world;
+  const y = latToY(mapState.lat, z) + py - box.clientHeight / 2;
+  if (y < 0 || y > world) return;
+  const q = alertQ, seq = ++q.seq, b = MSC_BOX.alerts;
+  Object.assign(q, { open: true, lat: yToLat(y, z), lon: xToLon(x, z), loading: true, error: '', alerts: [], asked: 0 });
+  if (!(q.lon > b[0] && q.lon < b[2] && q.lat > b[1] && q.lat < b[3])) {
+    Object.assign(q, { loading: false, error: "Environment Canada's alerts cover Canada only." });
+  }
+  renderMap(); renderAlertPanel();
+  if (!q.loading) return;
+  let alerts = [], error = '';
+  try {
+    const r = await fetch(alertInfoUrl(q.lat, q.lon));
+    if (!r.ok) throw new Error('GeoMet answered HTTP ' + r.status);
+    alerts = parseAlerts(await r.json());
+  } catch (e) { error = 'Could not get the alerts: ' + e.message; }
+  if (seq !== q.seq || !q.open) return;   // closed, or clicked elsewhere since
+  Object.assign(q, { loading: false, alerts, error, asked: Date.now() });
+  renderAlertPanel();
+}
+function closeAlertPanel() {
+  if (!alertQ.open) return;
+  alertQ.open = false; alertQ.seq++;   // a late answer must not match
+  renderAlertPanel(); renderMap();
+}
+function renderAlertPanel() {
+  const el = $('alertPanel'), q = alertQ;
+  el.hidden = !q.open;
+  if (!q.open) { el.innerHTML = ''; return; }
+  const when = t => t ? new Date(t).toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+  const deg = (v, p, n) => Math.abs(v).toFixed(2) + '° ' + (v >= 0 ? p : n);
+  const html = ['<button class="x" title="Close (Esc)">×</button><h3>Weather alerts here</h3><div class="where">' +
+    deg(q.lat, 'N', 'S') + ', ' + deg(q.lon, 'E', 'W') + (q.asked ? ' · as of ' + new Date(q.asked).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '') + '</div>'];
+  if (q.loading) html.push('<p>Asking Environment Canada…</p>');
+  else if (q.error) html.push('<p>' + esc(q.error) + '</p>');
+  else if (!q.alerts.length) html.push('<p>No weather alert is in effect here.</p>');
+  for (const a of q.loading || q.error ? [] : q.alerts) {
+    const colour = { red: '#ff0000', orange: '#ffa500', yellow: '#ffff00' }[a.colour] || '#d3d3d3';
+    const parts = [a.colour ? a.colour + ' level' : '', a.issued ? 'issued ' + when(a.issued) : '', a.ends ? 'until ' + when(a.ends) : ''].filter(Boolean).join(' · ');
+    html.push('<div class="alert"><b><i class="sw2" style="background:' + colour + '"></i>' + esc(a.name.charAt(0).toUpperCase() + a.name.slice(1)) + '</b>' +
+      '<div>' + esc(a.area) + '</div><div class="when">' + esc(parts.charAt(0).toUpperCase() + parts.slice(1)) + '</div>' +
+      '<div class="text">' + esc(a.text) + '</div></div>');
+  }
+  el.innerHTML = html.join('');
+  el.scrollTop = 0;
+  el.querySelector('.x').onclick = closeAlertPanel;
+}
+
 // Satellite: GOES-East east of 106°W, GOES-West west of it, each within its view (as radar.cpp's SatFor).
 function satFor(z, x, y) {
   const n = 2 ** z, lon = (x + 0.5) / n * 360 - 180, lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + 0.5) / n))) * 180 / Math.PI;
@@ -953,6 +1037,43 @@ async function loadFrames() {
 
 function saveMap() { save('wh.map', mapState); }
 
+// The tiles this page has shown, by URL, oldest first, at most SHOWN_MAX: each its loaded <img>, kept
+// after the map is redrawn without it. While a tile at the new zoom loads, the map draws these on a
+// canvas instead (as the app's DrawStandIn): the four finer tiles shrunk, else a coarser one cropped and
+// enlarged, else what finer ones there are. Drawing a loaded image costs no request, whatever its
+// cache headers (GeoMet sends none with its alerts, so a new <img> would fetch the tile again).
+const shownTiles = new Map(), SHOWN_MAX = 400, STAND_MAXPX = 512;
+function tileShown(img) {
+  const u = img.getAttribute('src');
+  if (!u || !img.naturalWidth) return;
+  shownTiles.delete(u); shownTiles.set(u, img);
+  if (shownTiles.size > SHOWN_MAX) shownTiles.delete(shownTiles.keys().next().value);
+}
+// What to draw for tile (zr, x, y): [{img, u, v, du, dx, dy, dw}], the source square and where it goes,
+// as fractions of the image and of the tile; empty for nothing. `at(z, x, y)` names a tile of the
+// layer, or returns '' where the layer has none.
+function standIn(at, zr, x, y, maxz) {
+  const has = (zz, sx, sy) => { const u = at(zz, sx, sy); return u ? shownTiles.get(u) : null; };
+  const kids = [];
+  for (let i = 0; i < 4 && zr + 1 <= maxz; i++) {
+    const img = has(zr + 1, 2 * x + (i & 1), 2 * y + (i >> 1));
+    if (img) kids.push({ img, u: 0, v: 0, du: 1, dx: (i & 1) / 2, dy: (i >> 1) / 2, dw: 0.5 });
+  }
+  if (kids.length === 4) return kids;
+  for (let k = 1; k <= 3 && zr - k >= 0; k++) {
+    const img = has(zr - k, x >> k, y >> k), m = 2 ** k - 1, du = 1 / (m + 1);
+    if (img) return [{ img, u: (x & m) * du, v: (y & m) * du, du, dx: 0, dy: 0, dw: 1 }];
+  }
+  return kids;
+}
+function drawStandIn(canvas, parts) {
+  const c = canvas.getContext('2d'), n = canvas.width;
+  for (const p of parts) {
+    const w = p.img.naturalWidth, h = p.img.naturalHeight;
+    c.drawImage(p.img, p.u * w, p.v * h, p.du * w, p.du * h, Math.floor(p.dx * n), Math.floor(p.dy * n), Math.ceil(p.dw * n), Math.ceil(p.dw * n));
+  }
+}
+
 // How long ago, in the largest units that fit (as the desktop app's AgoText).
 function agoText(seconds) {
   const unit = (n, one) => n + ' ' + one + (n === 1 ? '' : 's');
@@ -980,35 +1101,60 @@ function renderMap() {
   const cx = lonToX(mapState.lon, z), cy = latToY(mapState.lat, z);
   const ox = W / 2 - cx, oy = H / 2 - cy;   // screen = o + map px
   const html = [];
+  const stands = [];   // what each stand-in canvas draws, by its data-g less one
+  // One tile, with a stand-in canvas beneath it until it loads (the map's load handler then removes it).
+  const put = (cls, u, left, top, size, w, stand) => {
+    const s = shownTiles.has(u) ? [] : stand(), g = s.length ? stands.push(s) : 0, px = Math.min(size, STAND_MAXPX);
+    if (g) html.push('<canvas class="stand ' + cls + '" data-g="' + g + '" width="' + px + '" height="' + px +
+      '" style="left:' + left + 'px;top:' + top + 'px;width:' + w + 'px;height:' + w + 'px"></canvas>');
+    html.push('<img class="' + cls + '" alt="" width="' + w + '" height="' + w + '"' + (g ? ' data-g="' + g + '"' : '') +
+      ' style="left:' + left + 'px;top:' + top + 'px" src="' + u + '">');
+  };
+  const osm = (zz, x, y) => 'https://tile.openstreetmap.org/' + zz + '/' + x + '/' + y + '.png';
   for (let ty = Math.max(0, Math.floor(-oy / TILE)); ty <= Math.min(n - 1, Math.floor((H - oy) / TILE)); ty++) {
     for (let tx = Math.floor(-ox / TILE); tx <= Math.floor((W - ox) / TILE); tx++) {
       const wx = ((tx % n) + n) % n;
-      html.push('<img class="base" alt="" width="257" height="257" style="left:' + Math.round(ox + tx * TILE) + 'px;top:' +
-        Math.round(oy + ty * TILE) + 'px" src="https://tile.openstreetmap.org/' + z + '/' + wx + '/' + ty + '.png">');
+      put('base', osm(z, wx, ty), Math.round(ox + tx * TILE), Math.round(oy + ty * TILE), TILE, TILE + 1,
+        () => standIn(osm, z, wx, ty, MAXZ));
     }
   }
-  // Overlays: one 512 px tile at zoom zr covers 2^(z-zr) map tiles each way.
-  const overlay = (cls, maxz, url) => {
+  // Overlays: one 512 px tile at zoom zr covers 2^(z-zr) map tiles each way. While one loads: the same
+  // tile of an earlier picture (`alts`, as the app's frame before), else another zoom's of this picture
+  // or of an earlier one.
+  const overlay = (cls, maxz, url, alts) => {
     const zr = Math.min(z - 1, maxz), RT = TILE * 2 ** (z - zr), nr = 2 ** zr;
     for (let ty = Math.max(0, Math.floor(-oy / RT)); ty <= Math.min(nr - 1, Math.floor((H - oy) / RT)); ty++) {
       for (let tx = Math.floor(-ox / RT); tx <= Math.floor((W - ox) / RT); tx++) {
         const wx = ((tx % nr) + nr) % nr, src = url(zr, wx, ty);
-        if (src) html.push('<img class="' + cls + '" alt="" width="' + RT + '" height="' + RT + '" style="left:' + Math.round(ox + tx * RT) +
-          'px;top:' + Math.round(oy + ty * RT) + 'px" src="' + src + '">');
+        if (!src) continue;
+        put(cls, src, Math.round(ox + tx * RT), Math.round(oy + ty * RT), RT, RT, () => {
+          for (const a of alts) {
+            const u = a(zr, wx, ty), img = u ? shownTiles.get(u) : null;
+            if (img) return [{ img, u: 0, v: 0, du: 1, dx: 0, dy: 0, dw: 1 }];
+          }
+          for (const a of [url, ...alts]) { const s = standIn(a, zr, wx, ty, maxz); if (s.length) return s; }
+          return [];
+        });
       }
     }
   };
   const rs = radarState, f = rs.src === mapState.src ? rs.frames[rs.i] : null, na = mapState.src === 'na';
   const satT = mapState.sat && rs.satLatest ? satTimeAt(Math.min(rs.i, Math.max(0, stepCount() - 1))) : 0;
   const satOnly = !mapState.radar && !!satT;   // stepping through the satellite's own pictures
-  if (satT) overlay('sat', MSC_MAXZ, (zr, x, y) => { const s = satFor(zr, x, y); return s ? mscUrl(s, satT, zr, x, y) : ''; });
+  if (f !== rs.curF) { rs.prevF = rs.curF; rs.curF = f; }   // the pictures drawn before these, for stand-ins
+  if (satT !== rs.curSat) { rs.prevSat = rs.curSat; rs.curSat = satT; }
+  const satAt = t => (zr, x, y) => { const s = t ? satFor(zr, x, y) : ''; return s ? mscUrl(s, t, zr, x, y) : ''; };
+  if (satT) overlay('sat', MSC_MAXZ, satAt(satT), [satAt(rs.prevSat)]);
   if (mapState.alerts) {   // the alerts in effect: asked for again every 10 minutes
     const slot = Math.floor(Date.now() / 600e3) * 600;
-    overlay('alerts', MSC_MAXZ, (zr, x, y) => mscCovers('alerts', zr, x, y) ? mscUrl('alerts', slot, zr, x, y) : '');
+    const alertsAt = t => (zr, x, y) => mscCovers('alerts', zr, x, y) ? mscUrl('alerts', t, zr, x, y) : '';
+    overlay('alerts', MSC_MAXZ, alertsAt(slot), [alertsAt(slot - 600)]);
   }
   if (mapState.radar && f) {
-    if (na) overlay('radar', MSC_MAXZ, (zr, x, y) => mscCovers('radar', zr, x, y) ? mscUrl('radar', f.time, zr, x, y) : '');
-    else overlay('radar', RADAR_MAXZ, (zr, x, y) => rs.host + f.path + '/512/' + zr + '/' + x + '/' + y + '/2/1_1.png');
+    const radarAt = fr => !fr ? () => ''
+      : na ? (zr, x, y) => mscCovers('radar', zr, x, y) && fr.time ? mscUrl('radar', fr.time, zr, x, y) : ''
+      : (zr, x, y) => fr.path ? rs.host + fr.path + '/512/' + zr + '/' + x + '/' + y + '/2/1_1.png' : '';
+    overlay('radar', na ? MSC_MAXZ : RADAR_MAXZ, radarAt(f), [radarAt(rs.prevF)]);
   }
   if (state.loc) {   // the page's place, with its temperature now
     let x = ox + lonToX(state.loc.lon, z); const world = TILE * n;
@@ -1016,6 +1162,11 @@ function renderMap() {
     const t = state.fc ? '  ' + fT(cT(state.fc.j.current.temperature_2m)) : '';
     html.push('<div class="marker" style="left:' + Math.round(x) + 'px;top:' + Math.round(oy + latToY(state.loc.lat, z)) + 'px"><i></i><span>' +
       esc(state.loc.name.split(',')[0] + t) + '</span></div>');
+  }
+  if (alertQ.open) {   // the point the alert panel is about
+    let x = ox + lonToX(alertQ.lon, z); const world = TILE * n;
+    x += Math.round((W / 2 - x) / world) * world;
+    html.push('<div class="pin" style="left:' + Math.round(x) + 'px;top:' + Math.round(oy + latToY(alertQ.lat, z)) + 'px"></div>');
   }
   const hm = t => new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   let label = 'Radar off';
@@ -1035,7 +1186,7 @@ function renderMap() {
   html.push('<div class="mapnote" style="left:8px;top:8px;font-weight:600">' + esc(label) + '</div>');
   if (mapState.alerts) {
     html.push('<div class="mapnote" style="left:8px;top:34px">Alerts now ' + sw(['#ffff00', '#ffa500', '#ff0000']) + ' yellow, orange, red &nbsp;' +
-      sw(['#d3d3d3']) + ' statement</div>');
+      sw(['#d3d3d3']) + ' statement <span style="color:var(--text-muted)">· tap an area for details</span></div>');
   }
   const eccc = (mapState.radar && na) || mapState.alerts || mapState.sat;
   html.push('<div class="mapnote" style="right:4px;bottom:4px">© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors' +
@@ -1055,6 +1206,7 @@ function renderMap() {
     }
   }
   box.innerHTML = html.join('');
+  for (const c of box.querySelectorAll('canvas.stand')) drawStandIn(c, stands[c.dataset.g - 1]);
   updateAgo();
   $('mRadar').classList.toggle('on', mapState.radar);
   $('mWorld').classList.toggle('on', !na); $('mNA').classList.toggle('on', na);
@@ -1101,8 +1253,9 @@ function setPlaying(on) {
 // Drag with one pointer, pinch with two, wheel to zoom.
 (function wireMap() {
   const box = $('mapBox'), pts = new Map();
-  let pinch0 = 0, moved = false;
+  let pinch0 = 0, moved = false, down = null;   // down: where a one-finger press started, for telling a tap from a drag
   box.addEventListener('pointerdown', e => { box.setPointerCapture(e.pointerId); pts.set(e.pointerId, { x: e.clientX, y: e.clientY }); moved = false;
+    down = pts.size === 1 ? { x: e.clientX, y: e.clientY } : null;
     if (pts.size === 2) { const [a, b] = [...pts.values()]; pinch0 = Math.hypot(a.x - b.x, a.y - b.y); } });
   box.addEventListener('pointermove', e => {
     const p = pts.get(e.pointerId); if (!p) return;
@@ -1114,7 +1267,23 @@ function setPlaying(on) {
     }
   });
   const end = e => { pts.delete(e.pointerId); if (pts.size < 2) pinch0 = 0; if (moved) saveMap(); };
-  box.addEventListener('pointerup', end); box.addEventListener('pointercancel', end);
+  box.addEventListener('pointerup', e => {   // a tap (moved less than 6 px) with Alerts on: the alerts there
+    const tap = down && pts.size === 1 && Math.hypot(e.clientX - down.x, e.clientY - down.y) < 6;
+    down = null; end(e);
+    if (tap && mapState.alerts) { const r = box.getBoundingClientRect(); askAlertsAt(e.clientX - r.left, e.clientY - r.top); }
+  });
+  box.addEventListener('pointercancel', e => { down = null; end(e); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeAlertPanel(); });
+  box.addEventListener('load', e => {   // a tile in: remember it, and take away its stand-in
+    const t = e.target;
+    if (t.tagName !== 'IMG') return;
+    tileShown(t);
+    const s = t.dataset.g ? box.querySelector('.stand[data-g="' + t.dataset.g + '"]') : null;
+    if (s) s.remove();
+  }, true);
+  box.addEventListener('error', e => {   // a tile that failed: no broken-image icon, and its stand-in shows through
+    if (e.target.tagName === 'IMG') e.target.style.visibility = 'hidden';
+  }, true);
   box.addEventListener('wheel', e => { e.preventDefault(); const r = box.getBoundingClientRect();
     zoomMap(e.deltaY < 0 ? 1 : -1, e.clientX - r.left, e.clientY - r.top); }, { passive: false });
   $('mRadar').onclick = () => { mapState.radar = !mapState.radar; saveMap(); toLatest(); };   // the pictures stepped through change
@@ -1125,7 +1294,7 @@ function setPlaying(on) {
     loadFrames(); renderMap();
   };
   $('mWorld').onclick = () => setSrc('world'); $('mNA').onclick = () => setSrc('na');
-  $('mAlerts').onclick = () => { mapState.alerts = !mapState.alerts; saveMap(); renderMap(); };
+  $('mAlerts').onclick = () => { mapState.alerts = !mapState.alerts; saveMap(); if (!mapState.alerts) closeAlertPanel(); renderMap(); };
   $('mSat').onclick = () => { mapState.sat = !mapState.sat; saveMap(); if (mapState.sat && !radarState.satLatest) loadFrames();
     if (!mapState.radar) toLatest(); else renderMap(); };
   $('mPrev').onclick = () => { setPlaying(false); stepFrame(-1); };

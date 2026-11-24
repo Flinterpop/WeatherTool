@@ -86,9 +86,16 @@ constexpr double kHalfWorld = 20037508.342789244;   // metres, EPSG:3857
 } // namespace
 
 int64_t ParseIsoUtc(std::string_view s) {
-    // YYYY-MM-DDTHH:MM:SSZ
+    // YYYY-MM-DDTHH:MM:SSZ, or YYYY-MM-DDTHH:MM:SS.fffZ (the fraction is dropped)
     int Y = 0, M = 0, D = 0, h = 0, m = 0, sec = 0;
-    if (s.size() != 20 || s[4] != '-' || s[7] != '-' || s[10] != 'T' || s[13] != ':' || s[16] != ':' || s[19] != 'Z') { return -1; }
+    if (s.size() > 21 && s.size() <= 30 && s[19] == '.' && s.back() == 'Z') {
+        for (size_t i = 20; i + 1 < s.size(); ++i) {
+            if (s[i] < '0' || s[i] > '9') { return -1; }
+        }
+    } else if (s.size() != 20 || s[19] != 'Z') {
+        return -1;
+    }
+    if (s[4] != '-' || s[7] != '-' || s[10] != 'T' || s[13] != ':' || s[16] != ':') { return -1; }
     if (!Digits(s, 0, 4, Y) || !Digits(s, 5, 2, M) || !Digits(s, 8, 2, D) || !Digits(s, 11, 2, h) || !Digits(s, 14, 2, m) ||
         !Digits(s, 17, 2, sec)) {
         return -1;
@@ -203,6 +210,104 @@ std::wstring MscTileUrl(MscLayer layer, int64_t time, int z, int x, int y) {
     case MscLayer::SatWest: u += L"&LAYERS=GOES-West_1km_DayVis-NightIR&STYLES=&TIME=" + IsoUtc(time); break;
     }
     return u;
+}
+
+bool AlertsCoverPoint(double lat, double lon) {
+    return lon > kAlertsBox.w && lon < kAlertsBox.e && lat > kAlertsBox.s && lat < kAlertsBox.n;
+}
+
+std::wstring AlertInfoUrl(double lat, double lon) {
+    assert(lat >= -90.0 && lat <= 90.0 && lon >= -180.0 && lon <= 180.0);
+    // A 21 x 21 pixel window about 2 km across, asked about its centre pixel.
+    // WMS 1.3.0 with EPSG:4326 takes the box latitude first.
+    constexpr double d = 0.01;
+    std::array<wchar_t, 160> bbox{};
+    swprintf_s(bbox.data(), bbox.size(), L"%.5f,%.5f,%.5f,%.5f", lat - d, lon - d, lat + d, lon + d);
+    std::wstring u = L"https://geo.weather.gc.ca/geomet?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetFeatureInfo"
+                     L"&LAYERS=Current-Alerts&QUERY_LAYERS=Current-Alerts&STYLES=&CRS=EPSG:4326&BBOX=";
+    u += bbox.data();
+    u += L"&WIDTH=21&HEIGHT=21&I=10&J=10&INFO_FORMAT=application/json&FEATURE_COUNT=" + std::to_wstring(kMaxAlerts);
+    return u;
+}
+
+namespace {
+
+// Red first, then orange, yellow, and statements (no colour) last.
+int AlertRank(const Alert& a) {
+    if (a.colour == L"red") { return 0; }
+    if (a.colour == L"orange") { return 1; }
+    if (a.colour == L"yellow") { return 2; }
+    return 3;
+}
+
+// One feature's properties object [from, to) into `a`; false without a name.
+bool ReadAlert(std::string_view j, size_t from, size_t to, Alert& a) {
+    auto str = [&](std::string_view key, std::wstring& out, size_t cap) {
+        size_t p = json::FindKey(j, key, from, to);
+        return p != json::npos && json::ReadString(j, p, out, cap);
+    };
+    auto when = [&](std::string_view key) -> int64_t {
+        std::wstring w;
+        if (!str(key, w, 64)) { return -1; }
+        std::string n;
+        for (const wchar_t c : w) {
+            if (c > 0x7F) { return -1; }   // a time is ASCII
+            n += static_cast<char>(c);
+        }
+        return ParseIsoUtc(n);
+    };
+    if (!str("alert_name_en", a.name, 256) || a.name.empty()) { return false; }
+    (void)str("risk_colour_en", a.colour, 32);
+    (void)str("feature_name_en", a.area, 512);
+    (void)str("status_en", a.status, 64);
+    (void)str("alert_text_en", a.text, 16384);
+    a.issued = when("publication_datetime");
+    a.ends = when("event_end_datetime");
+    return true;
+}
+
+} // namespace
+
+bool ParseAlertInfo(std::string_view j, AlertInfo& out, std::wstring& error) {
+    AlertInfo info;
+    const size_t fs = json::FindKey(j, "features", 0, j.size());
+    if (j.find("\"FeatureCollection\"") == std::string_view::npos || fs == json::npos) {
+        error = L"GeoMet's answer is not a list of alerts.";
+        return false;
+    }
+    json::ArrayReader a(j, fs);
+    size_t el = 0;
+    for (size_t i = 0; i < 64 && a.NextElement(el); ++i) {
+        const size_t end = json::SkipContainer(j, el);
+        const size_t props = end == json::npos ? json::npos : json::FindKey(j, "properties", el, end);
+        const size_t pend = props == json::npos ? json::npos : json::SkipContainer(j, props);
+        Alert al;
+        if (pend == json::npos || !ReadAlert(j, props, pend, al)) { continue; }
+        bool dup = false;   // the same alert over two pieces of one area
+        for (size_t k = 0; k < info.count; ++k) {
+            dup = dup || (info.alert[k].name == al.name && info.alert[k].area == al.area && info.alert[k].text == al.text);
+        }
+        if (dup) { continue; }
+        if (info.count == kMaxAlerts) {   // full: a more severe alert displaces the least severe
+            if (AlertRank(al) >= AlertRank(info.alert[kMaxAlerts - 1])) { continue; }
+            --info.count;
+        }
+        size_t at = info.count;   // insertion by rank, keeping GeoMet's order within a rank
+        while (at > 0 && AlertRank(info.alert[at - 1]) > AlertRank(al)) {
+            info.alert[at] = std::move(info.alert[at - 1]);
+            --at;
+        }
+        info.alert[at] = std::move(al);
+        ++info.count;
+    }
+    if (!a.ok()) {
+        error = L"GeoMet's list of alerts is cut short.";
+        return false;
+    }
+    assert(info.count <= kMaxAlerts);
+    out = std::move(info);
+    error.clear();
+    return true;
 }
 
 int64_t MscLatest(std::string_view xml) {

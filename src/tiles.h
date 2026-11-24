@@ -25,6 +25,7 @@ namespace wt {
 
 constexpr UINT WM_APP_TILES  = WM_APP + 5;   // decoded tiles are waiting: call TakeDone
 constexpr UINT WM_APP_FRAMES = WM_APP + 6;   // the radar frame list arrived: call TakeFrames
+constexpr UINT WM_APP_ALERTINFO = WM_APP + 7;   // the alerts at a clicked point arrived: call TakeAlertInfo
 
 class TileStore {
 public:
@@ -48,6 +49,11 @@ public:
     void RequestFrames(radar::Source source, bool satellite);   // the radar frame list (+ the satellite's latest)
     bool TakeFrames(radar::Frames& out, std::wstring& err);
 
+    // The alerts in effect at a point, for a click on the map. Only the
+    // latest request is answered; `seq` comes back with the result.
+    void RequestAlertInfo(double lat, double lon, uint64_t seq);
+    bool TakeAlertInfo(radar::AlertInfo& out, uint64_t& seq, std::wstring& err);
+
     size_t Queued() const;
     std::wstring LastError() const;
 
@@ -70,6 +76,8 @@ private:
 
     void Run();
     bool Fetch(const Job& job, std::string& bytes, std::wstring& err);
+    void FetchFrames(radar::Source source, bool sat);
+    void FetchAlertInfo(double lat, double lon, uint64_t seq);
     bool RadarSlot();                            // worker: wait for a free radar request slot; false on Stop
     void Evict();
     void CleanOldRadar();
@@ -93,6 +101,13 @@ private:
     bool                    framesReady_ = false;
     radar::Frames           frames_;
     std::wstring            framesErr_;
+    bool                    infoWanted_ = false;
+    double                  infoLat_ = 0.0;
+    double                  infoLon_ = 0.0;
+    uint64_t                infoSeq_ = 0;    // of the request wanted, then of the result ready
+    bool                    infoReady_ = false;
+    radar::AlertInfo        info_;
+    std::wstring            infoErr_;
     std::wstring            lastErr_;
     std::deque<ULONGLONG>   radarTimes_;         // worker only
 

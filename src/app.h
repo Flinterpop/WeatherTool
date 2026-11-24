@@ -61,6 +61,15 @@ private:
     void    ToLatest();
     void PaintPrecipTypeKey(Gdiplus::Graphics& g, const Gdiplus::RectF& r);
     void PaintAlertsKey(Gdiplus::Graphics& g, Gdiplus::REAL y, const Gdiplus::RectF& r);
+    // A click on the map with Alerts on asks GeoMet what is in effect there;
+    // the answer shows in a panel at the map's top right until closed.
+    void AskAlertsAt(int x, int y);
+    void OnAlertInfo();
+    void CloseAlertPanel();
+    bool AlertPanelClick(int x, int y);   // true when (x, y) was on the open panel
+    void PaintAlertPin(Gdiplus::Graphics& g, const Gdiplus::RectF& r, double ox, double oy);
+    void PaintAlertPanel(Gdiplus::Graphics& g, const Gdiplus::RectF& r);
+    Gdiplus::REAL AlertPanelBody(Gdiplus::Graphics& g, Gdiplus::REAL x, Gdiplus::REAL y, Gdiplus::REAL w, bool draw);
     std::wstring MapCredit() const;
     radar::Source RadarSource() const { return static_cast<radar::Source>(cfg_.state.radarSrc); }
     void InvalidateMap();   // the map and its age label
@@ -195,6 +204,22 @@ private:
     bool          dragMoved_ = false;
     POINT         dragStart_{};
     POINT         dragLast_{};
+    struct AlertPanel {
+        bool             open = false;
+        bool             loading = false;
+        double           lat = 0.0, lon = 0.0;   // the point asked about
+        int64_t          asked = 0;              // Unix time of the answer
+        uint64_t         seq = 0;                // of the latest request
+        radar::AlertInfo info;
+        std::wstring     error;
+        float            scroll = 0.0f;          // pixels of the body scrolled off the top
+        float            bodyH = 0.0f;           // last paint: the body's visible height
+        float            contentH = 0.0f;        // and its full height
+        RECT             rect{};                 // last paint: the panel on screen
+        RECT             close{};                // and its close box
+        RECT             body{};                 // and its scrolling part
+    };
+    AlertPanel    alertPanel_;
     struct Marker { RECT hit; size_t index; };
     std::array<Marker, kMaxLocations> markers_{};
     size_t        markerCount_ = 0;

@@ -169,6 +169,29 @@ bool TileStore::TakeFrames(radar::Frames& out, std::wstring& err) {
     return true;
 }
 
+void TileStore::RequestAlertInfo(double lat, double lon, uint64_t seq) {
+    assert(seq > 0);
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        infoWanted_ = true;
+        infoLat_ = lat;
+        infoLon_ = lon;
+        infoSeq_ = seq;
+    }
+    cv_.notify_one();
+}
+
+bool TileStore::TakeAlertInfo(radar::AlertInfo& out, uint64_t& seq, std::wstring& err) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!infoReady_) { return false; }
+    infoReady_ = false;
+    out = std::move(info_);
+    info_ = radar::AlertInfo{};
+    seq = infoSeq_;
+    err = infoErr_;
+    return true;
+}
+
 size_t TileStore::Queued() const {
     std::lock_guard<std::mutex> lock(mu_);
     return pending_.size();
@@ -219,17 +242,85 @@ bool TileStore::Fetch(const Job& job, std::string& bytes, std::wstring& err) {
     return age >= 0 && ReadFileBytes(file, bytes, kMaxTileBytes, ignored);
 }
 
+// Worker: the radar frame list (and the satellite's newest picture).
+void TileStore::FetchFrames(radar::Source source, bool sat) {
+    HttpClient http;
+    http.UseAppIdentity();
+    auto buf = std::make_unique<char[]>(256 * 1024);
+    HttpResult hr;
+    std::wstring err;
+    radar::Frames f;
+    const bool msc = source == radar::Source::NorthAmerica;
+    const bool got = http.Get(msc ? radar::kMscCapsUrl : radar::kFramesUrl, buf.get(), 256 * 1024, hr, err) && hr.status == 200;
+    const std::string_view body(buf.get(), got ? hr.length : 0);
+    const bool ok = got && (msc ? radar::ParseMscTimes(body, f, err) : radar::ParseFrames(body, f, err));
+    if (err.empty() && !ok) { err = (msc ? L"GeoMet" : L"RainViewer") + std::wstring(L" answered HTTP ") + std::to_wstring(hr.status); }
+    if (ok && sat) {   // the satellite's newest picture; without it the satellite is simply not drawn
+        HttpResult sr;
+        std::wstring serr;
+        if (http.Get(radar::kSatCapsUrl, buf.get(), 256 * 1024, sr, serr) && sr.status == 200) {
+            const int64_t t = radar::MscLatest(std::string_view(buf.get(), sr.length));
+            f.satLatest = t > 0 ? t : 0;
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (framesWanted_ && framesSource_ != source) { return; }   // the source changed meanwhile: that list is wanted now
+        frames_ = ok ? f : radar::Frames{};
+        framesErr_ = err;
+        framesReady_ = true;
+    }
+    PostMessageW(notify_, WM_APP_FRAMES, 0, 0);
+}
+
+// Worker: the alerts at a clicked point. Not cached: a click is rare, and
+// what it asks about is what is in effect now.
+void TileStore::FetchAlertInfo(double lat, double lon, uint64_t seq) {
+    assert(seq > 0);
+    HttpClient http;
+    http.UseAppIdentity();
+    auto buf = std::make_unique<char[]>(radar::kMaxAlertInfoBytes);
+    HttpResult hr;
+    std::wstring err;
+    radar::AlertInfo info;
+    const bool got = http.Get(radar::AlertInfoUrl(lat, lon), buf.get(), radar::kMaxAlertInfoBytes, hr, err);
+    bool ok = got && hr.status == 200;
+    if (ok) {
+        ok = radar::ParseAlertInfo(std::string_view(buf.get(), hr.length), info, err);
+    } else if (got) {
+        err = L"GeoMet answered HTTP " + std::to_wstring(hr.status);
+    }
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (infoWanted_) { return; }   // clicked again meanwhile: that one is wanted now
+        info_ = ok ? std::move(info) : radar::AlertInfo{};
+        infoErr_ = ok ? std::wstring() : (err.empty() ? L"no answer from GeoMet" : err);
+        infoSeq_ = seq;
+        infoReady_ = true;
+    }
+    PostMessageW(notify_, WM_APP_ALERTINFO, 0, 0);
+}
+
 void TileStore::Run() {
     for (;;) {   // the service loop: ends on Stop()
         Job job;
         bool frames = false;
         radar::Source source = radar::Source::World;
         bool sat = false;
+        bool info = false;
+        double lat = 0.0, lon = 0.0;
+        uint64_t seq = 0;
         {
             std::unique_lock<std::mutex> lock(mu_);
-            cv_.wait(lock, [this] { return stop_ || framesWanted_ || !jobs_.empty(); });
+            cv_.wait(lock, [this] { return stop_ || infoWanted_ || framesWanted_ || !jobs_.empty(); });
             if (stop_) { return; }
-            if (framesWanted_) {
+            if (infoWanted_) {   // a click: someone is waiting for it
+                infoWanted_ = false;
+                info = true;
+                lat = infoLat_;
+                lon = infoLon_;
+                seq = infoSeq_;
+            } else if (framesWanted_) {
                 framesWanted_ = false;
                 frames = true;
                 source = framesSource_;
@@ -243,34 +334,12 @@ void TileStore::Run() {
                 }
             }
         }
+        if (info) {
+            FetchAlertInfo(lat, lon, seq);
+            continue;
+        }
         if (frames) {
-            HttpClient http;
-            http.UseAppIdentity();
-            auto buf = std::make_unique<char[]>(256 * 1024);
-            HttpResult hr;
-            std::wstring err;
-            radar::Frames f;
-            const bool msc = source == radar::Source::NorthAmerica;
-            const bool got = http.Get(msc ? radar::kMscCapsUrl : radar::kFramesUrl, buf.get(), 256 * 1024, hr, err) && hr.status == 200;
-            const std::string_view body(buf.get(), got ? hr.length : 0);
-            const bool ok = got && (msc ? radar::ParseMscTimes(body, f, err) : radar::ParseFrames(body, f, err));
-            if (err.empty() && !ok) { err = (msc ? L"GeoMet" : L"RainViewer") + std::wstring(L" answered HTTP ") + std::to_wstring(hr.status); }
-            if (ok && sat) {   // the satellite's newest picture; without it the satellite is simply not drawn
-                HttpResult sr;
-                std::wstring serr;
-                if (http.Get(radar::kSatCapsUrl, buf.get(), 256 * 1024, sr, serr) && sr.status == 200) {
-                    const int64_t t = radar::MscLatest(std::string_view(buf.get(), sr.length));
-                    f.satLatest = t > 0 ? t : 0;
-                }
-            }
-            {
-                std::lock_guard<std::mutex> lock(mu_);
-                if (framesWanted_ && framesSource_ != source) { continue; }   // the source changed meanwhile: that list is wanted now
-                frames_ = ok ? f : radar::Frames{};
-                framesErr_ = err;
-                framesReady_ = true;
-            }
-            PostMessageW(notify_, WM_APP_FRAMES, 0, 0);
+            FetchFrames(source, sat);
             continue;
         }
         std::string bytes;

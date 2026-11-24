@@ -16,6 +16,7 @@
 #include <cassert>
 #include <cmath>
 #include <ctime>
+#include <cwctype>
 
 namespace wt {
 namespace {
@@ -378,6 +379,7 @@ LRESULT App::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         if (MapTab()) { InvalidateMap(); }
         return 0;
     case WM_APP_FRAMES:  OnFramesReady(); return 0;
+    case WM_APP_ALERTINFO: OnAlertInfo(); return 0;
     case WM_SETCURSOR:
         if (reinterpret_cast<HWND>(wp) == hwnd_ && LOWORD(lp) == HTCLIENT && OnSetCursor()) { return TRUE; }
         return DefWindowProcW(hwnd_, WM_SETCURSOR, wp, lp);
@@ -1164,6 +1166,7 @@ void App::SetTab(int tab) {
     dayPick_ = -1;
     if (!MapTab()) {
         SetPlaying(false);
+        CloseAlertPanel();
     } else {
         if (!cfg_.state.hasMap && cfg_.state.selected < cfg_.locCount) { CenterMapOn(cfg_.state.selected); }
         if (tilesOk_ && UnixNow() - framesAsked_ > kFramesStale) {
@@ -1254,6 +1257,7 @@ void App::OnCommand(int id, int code) {
         return;
     case IDC_ALERTS:
         cfg_.state.alerts = !cfg_.state.alerts;
+        if (!cfg_.state.alerts) { CloseAlertPanel(); }
         SyncControls();
         InvalidateMap();
         return;
@@ -1265,7 +1269,8 @@ void App::OnCommand(int id, int code) {
     default: break;
     }
     if (id == IDM_TABNEXT) { SetTab((cfg_.state.tab + 1) % kTabCount); return; }
-    if (id == IDM_DAYCLEAR) {
+    if (id == IDM_DAYCLEAR) {   // Esc: also closes the alert panel
+        if (alertPanel_.open) { CloseAlertPanel(); }
         if (dayPick_ >= 0) {
             dayPick_ = -1;
             InvalidateRect(hwnd_, nullptr, FALSE);
@@ -1425,7 +1430,8 @@ int App::DaySlotAt(int x, int y) const {
 // above; a click on the same day goes back to the next 48 hours.
 void App::OnLButtonDown(int x, int y) {
     const POINT p{ x, y };
-    if (MapTab() && PtInRect(&mapRect_, p)) {   // the start of a drag, or a click on a marker
+    if (MapTab() && AlertPanelClick(x, y)) { return; }
+    if (MapTab() && PtInRect(&mapRect_, p)) {   // the start of a drag, or a click on a marker or an alert
         dragging_ = true;
         dragMoved_ = false;
         dragStart_ = dragLast_ = p;
@@ -1442,21 +1448,36 @@ void App::OnLButtonUp(int x, int y) {
     if (!dragging_) { return; }
     dragging_ = false;
     ReleaseCapture();
-    if (!dragMoved_) {   // a click: on a marker, that place
+    if (!dragMoved_) {   // a click: on a marker, that place; elsewhere, with Alerts on, the alerts there
         const int i = MarkerAt(x, y);
-        if (i >= 0) { SelectPlace(static_cast<size_t>(i)); }
+        if (i >= 0) {
+            SelectPlace(static_cast<size_t>(i));
+        } else if (cfg_.state.alerts) {
+            AskAlertsAt(x, y);
+        }
     }
 }
 
 void App::OnMouseWheel(int delta, int screenX, int screenY) {
     POINT p{ screenX, screenY };
     if (!MapTab() || !ScreenToClient(hwnd_, &p) || !PtInRect(&mapRect_, p)) { return; }
+    if (alertPanel_.open && PtInRect(&alertPanel_.rect, p)) {   // over the panel: scroll its text
+        const float most = std::max(0.0f, alertPanel_.contentH - alertPanel_.bodyH);
+        const float step = 3.0f * FontPx(9.0f, scale_) * 1.3f * (static_cast<float>(delta) / WHEEL_DELTA);
+        alertPanel_.scroll = std::max(0.0f, std::min(most, alertPanel_.scroll - step));
+        InvalidateRect(hwnd_, &alertPanel_.rect, FALSE);
+        return;
+    }
     ZoomMap(delta > 0 ? +1 : -1, p.x, p.y);
 }
 
 bool App::OnSetCursor() {
     POINT p{};
     if (!GetCursorPos(&p) || !ScreenToClient(hwnd_, &p)) { return false; }
+    if (MapTab() && alertPanel_.open && PtInRect(&alertPanel_.rect, p)) {
+        SetCursor(LoadCursorW(nullptr, PtInRect(&alertPanel_.close, p) ? IDC_HAND : IDC_ARROW));
+        return true;
+    }
     if (MapTab() && PtInRect(&mapRect_, p)) {
         SetCursor(LoadCursorW(nullptr, dragging_ ? IDC_SIZEALL : MarkerAt(p.x, p.y) >= 0 ? IDC_HAND : IDC_ARROW));
         return true;
@@ -2290,6 +2311,10 @@ void App::PaintRadarAge(Graphics& g) {
     DrawTextClip(g, t, f, theme_->textSecondary, RectF(r.X, r.Y + (r.Height - FontPx(10.0f, scale_) * 1.35f) / 2.0f, r.Width, r.Height));
 }
 
+template <typename KeyAt>
+static bool DrawStandIn(Graphics& g, TileStore& tiles, const RectF& dest, int zr, int x, int y, int maxZ, ImageAttributes* attr,
+                        KeyAt keyAt);
+
 void App::PaintMap(Graphics& g) {
     const RectF r = ToRectF(mapRect_);
     markerCount_ = 0;
@@ -2320,6 +2345,9 @@ void App::PaintMap(Graphics& g) {
         ColorMatrix cm = { { { 0.55f, 0, 0, 0, 0 }, { 0, 0.55f, 0, 0, 0 }, { 0, 0, 0.6f, 0, 0 }, { 0, 0, 0, 1, 0 }, { 0, 0, 0, 0, 1 } } };
         dim.SetColorMatrix(&cm);
     }
+    auto osmKey = [](int zz, int x, int y) {
+        return L"osm_" + std::to_wstring(zz) + L"_" + std::to_wstring(x) + L"_" + std::to_wstring(y);
+    };
     const int tx0 = static_cast<int>(std::floor((r.X - ox) / T));
     const int tx1 = static_cast<int>(std::floor((r.X + r.Width - ox) / T));
     const int ty0 = std::max(0, static_cast<int>(std::floor((r.Y - oy) / T)));
@@ -2329,20 +2357,11 @@ void App::PaintMap(Graphics& g) {
             const int wx = slippy::WrapTile(tx, z);
             const RectF dest(static_cast<REAL>(ox + tx * T), static_cast<REAL>(oy + ty * T),
                              static_cast<REAL>(T) + 0.5f, static_cast<REAL>(T) + 0.5f);
-            const std::wstring key = L"osm_" + std::to_wstring(z) + L"_" + std::to_wstring(wx) + L"_" + std::to_wstring(ty);
-            Bitmap* b = tiles_.Get(key, slippy::OsmTileUrl(z, wx, ty), false);
-            for (int k = 1; b == nullptr && k <= 3 && z - k >= 0; ++k) {   // meanwhile, a coarser tile scaled up
-                const slippy::Parent p = slippy::ParentOf(z, wx, ty, z - k);
-                Bitmap* pb = tiles_.Peek(L"osm_" + std::to_wstring(z - k) + L"_" + std::to_wstring(p.x) + L"_" + std::to_wstring(p.y));
-                if (pb != nullptr) {
-                    const REAL w = static_cast<REAL>(pb->GetWidth());
-                    g.DrawImage(pb, dest, static_cast<REAL>(p.u0 * w), static_cast<REAL>(p.v0 * w),
-                                static_cast<REAL>(p.du * w), static_cast<REAL>(p.du * w), UnitPixel, &dim);
-                    break;
-                }
-            }
+            Bitmap* b = tiles_.Get(osmKey(z, wx, ty), slippy::OsmTileUrl(z, wx, ty), false);
             if (b != nullptr) {
                 g.DrawImage(b, dest, 0, 0, static_cast<REAL>(b->GetWidth()), static_cast<REAL>(b->GetHeight()), UnitPixel, &dim);
+            } else {   // meanwhile, the finer tiles shrunk or a coarser one enlarged
+                (void)DrawStandIn(g, tiles_, dest, z, wx, ty, slippy::kMaxZoom, &dim, osmKey);
             }
         }
     }
@@ -2351,9 +2370,11 @@ void App::PaintMap(Graphics& g) {
     if (cfg_.state.alerts) { PaintAlerts(g, r, ox, oy); }
     if (cfg_.state.radar && frames_.count > 0) { PaintRadar(g, r, ox, oy); }
     PaintMarkers(g, r, ox, oy);
+    if (alertPanel_.open) { PaintAlertPin(g, r, ox, oy); }
     g.ResetClip();
     g.SetPixelOffsetMode(PixelOffsetModeDefault);
     PaintMapOverlays(g, r);
+    if (alertPanel_.open) { PaintAlertPanel(g, r); }
 }
 
 // The 512 px overlay tiles (zoom zr) over the map rectangle: calls `each` with
@@ -2376,6 +2397,56 @@ static void ForOverlayTiles(const RectF& r, double ox, double oy, double T, int 
     }
 }
 
+// A tile (zr, x, y) that is not here yet, drawn into `dest` from what the
+// memory cache has at a neighbouring zoom, so a zoom does not blank the layer
+// while its new tiles load: the four finer tiles shrunk (after zooming out),
+// else a coarser one cropped and enlarged (after zooming in), else whichever
+// finer ones there are. Never queues a download. `keyAt(z, x, y)` names a
+// tile of the layer, or returns "" where the layer has none; `maxZ` is the
+// layer's highest zoom. Returns whether anything was drawn.
+template <typename KeyAt>
+static bool DrawStandIn(Graphics& g, TileStore& tiles, const RectF& dest, int zr, int x, int y, int maxZ, ImageAttributes* attr,
+                        KeyAt keyAt) {
+    assert(zr >= 0 && zr <= maxZ && x >= 0 && y >= 0);
+    auto draw = [&](Bitmap* b, const RectF& to, REAL u, REAL v, REAL du) {
+        const REAL w = static_cast<REAL>(b->GetWidth());
+        g.DrawImage(b, to, u * w, v * w, du * w, du * w, UnitPixel, attr);
+    };
+    std::array<Bitmap*, 4> kids{};
+    size_t have = 0;
+    if (zr + 1 <= maxZ) {
+        for (size_t k = 0; k < kids.size(); ++k) {
+            const std::wstring key = keyAt(zr + 1, 2 * x + static_cast<int>(k % 2), 2 * y + static_cast<int>(k / 2));
+            kids[k] = key.empty() ? nullptr : tiles.Peek(key);
+            have += kids[k] != nullptr ? 1u : 0u;
+        }
+    }
+    const REAL hw = dest.Width / 2.0f, hh = dest.Height / 2.0f;
+    auto drawKids = [&] {
+        for (size_t k = 0; k < kids.size(); ++k) {
+            if (kids[k] == nullptr) { continue; }
+            const RectF to(dest.X + hw * static_cast<REAL>(k % 2), dest.Y + hh * static_cast<REAL>(k / 2), hw + 0.5f, hh + 0.5f);
+            draw(kids[k], to, 0.0f, 0.0f, 1.0f);
+        }
+    };
+    if (have == kids.size()) {   // all four: the sharpest stand-in, and no overlap to double a translucent layer
+        drawKids();
+        return true;
+    }
+    for (int k = 1; k <= 3 && zr - k >= 0; ++k) {
+        const slippy::Parent p = slippy::ParentOf(zr, x, y, zr - k);
+        const std::wstring key = keyAt(zr - k, p.x, p.y);
+        Bitmap* b = key.empty() ? nullptr : tiles.Peek(key);
+        if (b != nullptr) {
+            draw(b, RectF(dest.X, dest.Y, dest.Width + 0.5f, dest.Height + 0.5f), static_cast<REAL>(p.u0), static_cast<REAL>(p.v0),
+                 static_cast<REAL>(p.du));
+            return true;
+        }
+    }
+    drawKids();   // some of the finer ones are better than nothing
+    return have > 0;
+}
+
 // Radar: one 512 px tile at zoom zr covers 2^(z-zr) map tiles each way.
 void App::PaintRadar(Graphics& g, const RectF& r, double ox, double oy) {
     assert(frames_.count > 0 && frame_ < frames_.count);
@@ -2387,10 +2458,13 @@ void App::PaintRadar(Graphics& g, const RectF& r, double ox, double oy) {
     see.SetColorMatrix(&am);
     const size_t next = (frame_ + 1) % frames_.count;
     const size_t prev = (frame_ + frames_.count - 1) % frames_.count;
-    auto key = [&](size_t f, int x, int y) {
-        return L"radar_" + std::to_wstring(frames_.frame[f].time) + (msc ? L"_na" : L"_") + std::to_wstring(zr) + L"_" +
+    auto keyAt = [&](size_t f, int zz, int x, int y) {
+        if (msc && !radar::MscCovers(radar::MscLayer::Radar, zz, x, y)) { return std::wstring(); }
+        return L"radar_" + std::to_wstring(frames_.frame[f].time) + (msc ? L"_na" : L"_") + std::to_wstring(zz) + L"_" +
                std::to_wstring(x) + L"_" + std::to_wstring(y);
     };
+    auto key = [&](size_t f, int x, int y) { return keyAt(f, zr, x, y); };
+    const int maxZ = radar::MaxZoom(frames_.source);
     auto url = [&](size_t f, int x, int y) {
         return msc ? radar::MscTileUrl(radar::MscLayer::Radar, frames_.frame[f].time, zr, x, y)
                    : radar::TileUrl(frames_, f, zr, x, y);
@@ -2403,6 +2477,8 @@ void App::PaintRadar(Graphics& g, const RectF& r, double ox, double oy) {
         if (playing_) { (void)tiles_.Get(key(next, x, y), url(next, x, y), true); }
         if (b != nullptr) {
             g.DrawImage(b, dest, 0, 0, static_cast<REAL>(b->GetWidth()), static_cast<REAL>(b->GetHeight()), UnitPixel, &see);
+        } else if (!DrawStandIn(g, tiles_, dest, zr, x, y, maxZ, &see, [&](int zz, int sx, int sy) { return keyAt(frame_, zz, sx, sy); })) {
+            (void)DrawStandIn(g, tiles_, dest, zr, x, y, maxZ, &see, [&](int zz, int sx, int sy) { return keyAt(prev, zz, sx, sy); });
         }
     });
 }
@@ -2444,9 +2520,14 @@ void App::PaintSatellite(Graphics& g, const RectF& r, double ox, double oy) {
     see.SetColorMatrix(&am);
     const int64_t now = SatTime(frame_);
     const int64_t next = playing_ && StepCount() > 0 ? SatTime((frame_ + 1) % StepCount()) : now;
-    auto key = [&](int64_t t, radar::MscLayer which, int x, int y) {
-        return L"radar_" + std::to_wstring(t) + (which == radar::MscLayer::SatEast ? L"_se" : L"_sw") + std::to_wstring(zr) + L"_" +
+    auto keyIn = [](int64_t t, radar::MscLayer which, int zz, int x, int y) {
+        return L"radar_" + std::to_wstring(t) + (which == radar::MscLayer::SatEast ? L"_se" : L"_sw") + std::to_wstring(zz) + L"_" +
                std::to_wstring(x) + L"_" + std::to_wstring(y);
+    };
+    auto key = [&](int64_t t, radar::MscLayer which, int x, int y) { return keyIn(t, which, zr, x, y); };
+    auto keyAt = [&](int zz, int x, int y) {   // a stand-in tile: which satellite it came from is its own
+        radar::MscLayer w{};
+        return radar::SatFor(zz, x, y, w) ? keyIn(now, w, zz, x, y) : std::wstring();
     };
     const double T = slippy::kTile * static_cast<double>(scale_);
     ForOverlayTiles(r, ox, oy, T, z, zr, [&](int x, int y, const RectF& dest) {
@@ -2458,6 +2539,8 @@ void App::PaintSatellite(Graphics& g, const RectF& r, double ox, double oy) {
         if (b != nullptr) {   // half a pixel over, as the base map does, or the seams show through
             const RectF over(dest.X, dest.Y, dest.Width + 0.5f, dest.Height + 0.5f);
             g.DrawImage(b, over, 0, 0, static_cast<REAL>(b->GetWidth()), static_cast<REAL>(b->GetHeight()), UnitPixel, &see);
+        } else {
+            (void)DrawStandIn(g, tiles_, dest, zr, x, y, radar::kMscMaxZoom, &see, keyAt);
         }
     });
 }
@@ -2471,16 +2554,24 @@ void App::PaintAlerts(Graphics& g, const RectF& r, double ox, double oy) {
     ImageAttributes see;
     ColorMatrix am = { { { 1, 0, 0, 0, 0 }, { 0, 1, 0, 0, 0 }, { 0, 0, 1, 0, 0 }, { 0, 0, 0, 0.45f, 0 }, { 0, 0, 0, 0, 1 } } };
     see.SetColorMatrix(&am);
-    auto key = [&](int64_t t, int x, int y) {
-        return L"alerts_" + std::to_wstring(t) + L"_" + std::to_wstring(zr) + L"_" + std::to_wstring(x) + L"_" + std::to_wstring(y);
+    auto keyAt = [](int64_t t, int zz, int x, int y) {
+        if (!radar::MscCovers(radar::MscLayer::Alerts, zz, x, y)) { return std::wstring(); }
+        return L"alerts_" + std::to_wstring(t) + L"_" + std::to_wstring(zz) + L"_" + std::to_wstring(x) + L"_" + std::to_wstring(y);
     };
     const double T = slippy::kTile * static_cast<double>(scale_);
     ForOverlayTiles(r, ox, oy, T, z, zr, [&](int x, int y, const RectF& dest) {
         if (!radar::MscCovers(radar::MscLayer::Alerts, zr, x, y)) { return; }
-        Bitmap* b = tiles_.Get(key(slot, x, y), radar::MscTileUrl(radar::MscLayer::Alerts, 0, zr, x, y), true);
-        if (b == nullptr) { b = tiles_.Peek(key(slot - kAlertsEvery, x, y)); }   // the last ones until the new ones come
+        Bitmap* b = tiles_.Get(keyAt(slot, zr, x, y), radar::MscTileUrl(radar::MscLayer::Alerts, 0, zr, x, y), true);
+        if (b == nullptr) { b = tiles_.Peek(keyAt(slot - kAlertsEvery, zr, x, y)); }   // the last ones until the new ones come
         if (b != nullptr) {
             g.DrawImage(b, dest, 0, 0, static_cast<REAL>(b->GetWidth()), static_cast<REAL>(b->GetHeight()), UnitPixel, &see);
+            return;
+        }
+        for (const int64_t t : { slot, slot - kAlertsEvery }) {   // another zoom's, this period's or the last
+            if (DrawStandIn(g, tiles_, dest, zr, x, y, radar::kMscMaxZoom, &see,
+                            [&](int zz, int sx, int sy) { return keyAt(t, zz, sx, sy); })) {
+                return;
+            }
         }
     });
 }
@@ -2681,7 +2772,8 @@ void App::PaintAlertsKey(Graphics& g, REAL y, const RectF& r) {
     static const ARGB kStatement[] = { 0xFFD3D3D3 };
     const wchar_t* name = L"Alerts now";   // the layer has no past: Play leaves them as they are now
     const REAL nw = TextW(g, name, f) + 8.0f * s;
-    const REAL tw = TextW(g, L"yellow, orange, red", f) + TextW(g, L"statement", f);
+    const wchar_t* hint = L"· click an area for details";
+    const REAL tw = TextW(g, L"yellow, orange, red", f) + TextW(g, L"statement", f) + TextW(g, hint, f) + 6.0f * s;
     const RectF b(r.X + 8.0f * s, y, 6.0f * s + nw + 48.0f * s + tw + 40.0f * s, 20.0f * s);
     SolidBrush back(theme_->tipBg);
     Pen edge(theme_->tipBorder, 1.0f);
@@ -2693,6 +2785,235 @@ void App::PaintAlertsKey(Graphics& g, REAL y, const RectF& r) {
     x += TextW(g, L"yellow, orange, red", f) + 14.0f * s;
     x = KeyRow(g, f, ink, x, b.Y + 5.0f * s, s, L"", 0.0f, kStatement, 1);
     PaintText(g, L"statement", f, ink, x + 4.0f * s, b.Y + 2.0f * s);
+    PaintText(g, hint, f, theme_->textMuted, x + 10.0f * s + TextW(g, L"statement", f), b.Y + 2.0f * s);
+}
+
+// ---------------------------------------------------------------------------
+// The alerts at a clicked point
+
+void App::AskAlertsAt(int x, int y) {
+    assert(MapTab() && cfg_.state.alerts);
+    if (!tilesOk_) { return; }
+    const int z = cfg_.state.mapZoom;
+    const double dx = (x - (mapRect_.left + mapRect_.right) / 2.0) / scale_;
+    const double dy = (y - (mapRect_.top + mapRect_.bottom) / 2.0) / scale_;
+    const double world = slippy::WorldSize(z);
+    const double mx = std::fmod(std::fmod(slippy::LonToX(cfg_.state.mapLon, z) + dx, world) + world, world);
+    const double my = slippy::LatToY(cfg_.state.mapLat, z) + dy;
+    if (my < 0.0 || my > world) { return; }   // above or below the world
+    AlertPanel& a = alertPanel_;
+    a = AlertPanel{ true, false, slippy::YToLat(my, z), slippy::XToLon(mx, z), 0, a.seq + 1 };
+    assert(a.lon >= -180.0 && a.lon <= 180.0);
+    if (radar::AlertsCoverPoint(a.lat, a.lon)) {
+        a.loading = true;
+        tiles_.RequestAlertInfo(a.lat, a.lon, a.seq);
+    } else {
+        a.error = L"Environment Canada's alerts cover Canada only.";
+    }
+    InvalidateMap();
+}
+
+void App::OnAlertInfo() {
+    radar::AlertInfo info;
+    uint64_t seq = 0;
+    std::wstring err;
+    if (!tiles_.TakeAlertInfo(info, seq, err)) { return; }
+    AlertPanel& a = alertPanel_;
+    if (!a.open || seq != a.seq) { return; }   // closed, or clicked elsewhere since
+    a.loading = false;
+    a.info = std::move(info);
+    a.error = err.empty() ? std::wstring() : L"Could not get the alerts: " + err;
+    a.asked = UnixNow();
+    a.scroll = 0.0f;
+    InvalidateMap();
+}
+
+void App::CloseAlertPanel() {
+    if (!alertPanel_.open) { return; }
+    const uint64_t seq = alertPanel_.seq;   // a late answer must not match
+    alertPanel_ = AlertPanel{};
+    alertPanel_.seq = seq;
+    InvalidateMap();
+}
+
+bool App::AlertPanelClick(int x, int y) {
+    const POINT p{ x, y };
+    if (!alertPanel_.open || !PtInRect(&alertPanel_.rect, p)) { return false; }
+    if (PtInRect(&alertPanel_.close, p)) { CloseAlertPanel(); }
+    return true;
+}
+
+// A ring at the point the panel is about.
+void App::PaintAlertPin(Graphics& g, const RectF& r, double ox, double oy) {
+    const int z = cfg_.state.mapZoom;
+    const float s = scale_;
+    const double world = slippy::WorldSize(z) * s;
+    double x = ox + slippy::LonToX(alertPanel_.lon, z) * s;
+    x += std::round((r.X + r.Width / 2.0 - x) / world) * world;   // the copy of the world nearest the centre
+    const double y = oy + slippy::LatToY(alertPanel_.lat, z) * s;
+    const REAL rad = 6.0f * s;
+    const RectF dot(static_cast<REAL>(x) - rad, static_cast<REAL>(y) - rad, 2.0f * rad, 2.0f * rad);
+    Pen outer(Color(255, 255, 255, 255), 4.0f * s);
+    Pen inner(Color(255, 20, 20, 20), 2.0f * s);
+    g.SetSmoothingMode(SmoothingModeAntiAlias);
+    g.DrawEllipse(&outer, dot);
+    g.DrawEllipse(&inner, dot);
+    g.SetSmoothingMode(SmoothingModeDefault);
+}
+
+namespace {
+
+// "Sun 23 Nov 16:00", local time; empty for an unknown time.
+std::wstring AlertTime(int64_t t) {
+    if (t <= 0) { return L""; }
+    tm l{};
+    const __time64_t tt = t;
+    if (_localtime64_s(&l, &tt) != 0 || l.tm_wday < 0 || l.tm_wday > 6 || l.tm_mon < 0 || l.tm_mon > 11) { return L""; }
+    std::array<wchar_t, 48> b{};
+    swprintf_s(b.data(), b.size(), L"%s %d %s %02d:%02d", kDayShort[l.tm_wday], l.tm_mday, kMonthShort[l.tm_mon], l.tm_hour, l.tm_min);
+    return b.data();
+}
+
+ARGB AlertColour(const std::wstring& c) {
+    if (c == L"red") { return 0xFFFF0000; }
+    if (c == L"orange") { return 0xFFFFA500; }
+    if (c == L"yellow") { return 0xFFFFFF00; }
+    return 0xFFD3D3D3;   // a statement, as on the map
+}
+
+} // namespace
+
+// The panel's scrolling part from (x, y), `w` wide; its height. Draws only
+// when `draw`, so the same walk measures it.
+REAL App::AlertPanelBody(Graphics& g, REAL x, REAL y, REAL w, bool draw) {
+    const float s = scale_;
+    const Font fb = UiFont(9.5f, s, FontStyleBold);
+    const Font f = UiFont(9.0f, s);
+    const Font fs = UiFont(8.5f, s);
+    StringFormat fmt;
+    const REAL y0 = y;
+    auto para = [&](const std::wstring& t, const Font& font, const Color& c, REAL indent, REAL after) {
+        if (t.empty()) { return; }
+        RectF box;
+        const RectF lay(x + indent, y, w - indent, 100000.0f);
+        g.MeasureString(t.c_str(), static_cast<INT>(t.size()), &font, lay, &fmt, &box);
+        if (draw) {
+            SolidBrush b(c);
+            g.DrawString(t.c_str(), static_cast<INT>(t.size()), &font, RectF(lay.X, y, lay.Width, box.Height + 2.0f), &fmt, &b);
+        }
+        y += box.Height + after;
+    };
+    const AlertPanel& a = alertPanel_;
+    if (a.loading) {
+        para(L"Asking Environment Canada…", f, theme_->tipText, 0.0f, 0.0f);
+        return y - y0;
+    }
+    if (!a.error.empty()) {
+        para(a.error, f, theme_->tipText, 0.0f, 0.0f);
+        return y - y0;
+    }
+    if (a.info.count == 0) {
+        para(L"No weather alert is in effect here.", f, theme_->tipText, 0.0f, 0.0f);
+        return y - y0;
+    }
+    Pen rule(theme_->tipBorder, 1.0f);
+    for (size_t i = 0; i < a.info.count; ++i) {
+        const radar::Alert& al = a.info.alert[i];
+        if (i > 0) {
+            if (draw) { g.DrawLine(&rule, x, y + 4.0f * s, x + w, y + 4.0f * s); }
+            y += 10.0f * s;
+        }
+        std::wstring name = al.name;
+        name[0] = static_cast<wchar_t>(towupper(name[0]));
+        if (draw) {
+            SolidBrush sw{ Color(AlertColour(al.colour)) };
+            Pen edge(Color(255, 90, 90, 90), 1.0f);
+            const RectF box(x, y + 3.0f * s, 12.0f * s, 12.0f * s);
+            g.FillRectangle(&sw, box);
+            g.DrawRectangle(&edge, box);
+        }
+        para(name, fb, theme_->tipText, 18.0f * s, 1.0f * s);
+        para(al.area, f, theme_->tipText, 0.0f, 1.0f * s);
+        std::wstring when;
+        if (!al.colour.empty()) { when = al.colour + L" level"; }
+        const std::wstring issued = AlertTime(al.issued), ends = AlertTime(al.ends);
+        if (!issued.empty()) { when += (when.empty() ? L"Issued " : L" · issued ") + issued; }
+        if (!ends.empty()) { when += (when.empty() ? L"Until " : L" · until ") + ends; }
+        if (!when.empty()) { when[0] = static_cast<wchar_t>(towupper(when[0])); }
+        para(when, fs, theme_->textMuted, 0.0f, 6.0f * s);
+        para(al.text, f, theme_->tipText, 0.0f, 0.0f);
+    }
+    return y - y0;
+}
+
+// At the map's top right: a title, a close box, and the alerts, scrolling
+// with the mouse wheel when they are taller than the map.
+void App::PaintAlertPanel(Graphics& g, const RectF& r) {
+    AlertPanel& a = alertPanel_;
+    const float s = scale_;
+    const REAL pad = 10.0f * s;
+    const REAL w = std::min(400.0f * s, r.Width - 16.0f * s);
+    if (w < 120.0f * s || r.Height < 120.0f * s) {
+        a.rect = a.close = a.body = RECT{};
+        return;
+    }
+    const RectF p0(r.X + r.Width - w - 8.0f * s, r.Y + 8.0f * s, w, 0.0f);
+    const REAL headH = 40.0f * s;
+    const REAL inner = w - 2.0f * pad - 8.0f * s;   // room for the scroll bar
+    a.contentH = AlertPanelBody(g, 0.0f, 0.0f, inner, false);
+    const REAL maxBody = r.Height - 16.0f * s - 30.0f * s - headH - pad;   // above the credits
+    a.bodyH = std::max(20.0f * s, std::min(a.contentH, maxBody));
+    a.scroll = std::max(0.0f, std::min(a.scroll, a.contentH - a.bodyH));
+    const RectF p(p0.X, p0.Y, w, headH + a.bodyH + pad);
+    auto toRect = [](const RectF& f) {
+        return RECT{ static_cast<LONG>(f.X), static_cast<LONG>(f.Y), static_cast<LONG>(f.X + f.Width + 1.0f), static_cast<LONG>(f.Y + f.Height + 1.0f) };
+    };
+    a.rect = toRect(p);
+
+    SolidBrush back(theme_->tipBg);
+    Pen edge(theme_->tipBorder, 1.0f);
+    g.FillRectangle(&back, p);
+    g.DrawRectangle(&edge, p);
+    const Font fb = UiFont(10.0f, s, FontStyleBold);
+    const Font fs = UiFont(8.5f, s);
+    PaintText(g, L"Weather alerts here", fb, theme_->tipText, p.X + pad, p.Y + 6.0f * s);
+    std::array<wchar_t, 96> where{};
+    swprintf_s(where.data(), where.size(), L"%.2f° %c, %.2f° %c", std::fabs(a.lat), a.lat >= 0.0 ? L'N' : L'S',
+               std::fabs(a.lon), a.lon >= 0.0 ? L'E' : L'W');
+    std::wstring sub = where.data();
+    if (a.asked > 0) {
+        tm l{};
+        const __time64_t t = a.asked;
+        _localtime64_s(&l, &t);
+        std::array<wchar_t, 32> b{};
+        swprintf_s(b.data(), b.size(), L" · as of %02d:%02d", l.tm_hour, l.tm_min);
+        sub += b.data();
+    }
+    PaintText(g, sub, fs, theme_->textMuted, p.X + pad, p.Y + 22.0f * s);
+
+    // The close box, a cross.
+    const REAL cs = 16.0f * s;
+    const RectF cb(p.X + p.Width - pad - cs, p.Y + 8.0f * s, cs, cs);
+    a.close = toRect(RectF(cb.X - 4.0f * s, cb.Y - 4.0f * s, cs + 8.0f * s, cs + 8.0f * s));
+    Pen cross(theme_->tipText, 1.6f * s);
+    g.SetSmoothingMode(SmoothingModeAntiAlias);
+    g.DrawLine(&cross, cb.X + 3.0f * s, cb.Y + 3.0f * s, cb.X + cs - 3.0f * s, cb.Y + cs - 3.0f * s);
+    g.DrawLine(&cross, cb.X + cs - 3.0f * s, cb.Y + 3.0f * s, cb.X + 3.0f * s, cb.Y + cs - 3.0f * s);
+    g.SetSmoothingMode(SmoothingModeDefault);
+
+    // The body, clipped and scrolled, with a scroll bar when it does not fit.
+    const RectF body(p.X + pad, p.Y + headH, inner, a.bodyH);
+    a.body = toRect(body);
+    g.SetClip(body);
+    (void)AlertPanelBody(g, body.X, body.Y - a.scroll, inner, true);
+    g.ResetClip();
+    if (a.contentH > a.bodyH + 0.5f) {
+        const REAL tx = p.X + p.Width - pad / 2.0f - 5.0f * s;
+        const REAL th = std::max(16.0f * s, a.bodyH * a.bodyH / a.contentH);
+        const REAL ty = body.Y + (a.bodyH - th) * (a.scroll / (a.contentH - a.bodyH));
+        SolidBrush track(theme_->tipBorder);
+        g.FillRectangle(&track, tx, ty, 4.0f * s, th);
+    }
 }
 
 void App::PaintStatus(Graphics& g) {

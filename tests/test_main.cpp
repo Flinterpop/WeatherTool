@@ -503,6 +503,62 @@ void TestMap() {
               .find(L"&LAYERS=GOES-West_1km_DayVis-NightIR&STYLES=&TIME=2026-11-22T02:20:00Z") != std::wstring::npos);
 }
 
+// The alerts at a clicked point: GeoMet's GetFeatureInfo reply, in the shape
+// it had on 23 Nov 2026 (properties trimmed, geometry shortened).
+void TestAlertInfo() {
+    CHECK(radar::ParseIsoUtc("2026-11-22T01:54:00.422Z") == 1795312440);   // GeoMet's alert times carry milliseconds
+    CHECK(radar::ParseIsoUtc("2026-11-22T01:54:00.Z") == -1 && radar::ParseIsoUtc("2026-11-22T01:54:00.4x2Z") == -1);
+    CHECK(radar::AlertsCoverPoint(45.42, -75.70) && !radar::AlertsCoverPoint(25.76, -80.19));   // Ottawa, Miami
+    const std::wstring u = radar::AlertInfoUrl(49.61, -81.69);
+    CHECK(u.rfind(L"https://geo.weather.gc.ca/geomet?", 0) == 0 && u.find(L"&REQUEST=GetFeatureInfo") != std::wstring::npos);
+    CHECK(u.find(L"&BBOX=49.60000,-81.70000,49.62000,-81.68000&WIDTH=21&HEIGHT=21&I=10&J=10") != std::wstring::npos);
+    CHECK(u.find(L"&QUERY_LAYERS=Current-Alerts") != std::wstring::npos && u.find(L"&INFO_FORMAT=application/json") != std::wstring::npos);
+
+    const char* reply = R"({
+"type": "FeatureCollection", "name": "Current-Alerts",
+"features": [
+{ "type": "Feature", "properties": { "id": "1", "alert_type": "statement", "alert_name_en": "special weather statement",
+  "alert_name_fr": "bulletin météorologique spécial", "publication_datetime": "2026-11-23T02:00:30.324Z",
+  "event_end_datetime": "2026-11-23T23:00:00.000Z", "alert_text_en": "Heavy rainfall is expected.\n\nLocations: Nova Scotia.",
+  "risk_colour_en": "", "feature_name_en": "Cumberland County - Minas Shore", "status_en": "continued" },
+  "geometry": { "type": "Polygon", "coordinates": [ [ [ -64.1, 45.3 ], [ -64.0, 45.4 ], [ -64.1, 45.3 ] ] ] } },
+{ "type": "Feature", "properties": { "id": "2", "alert_name_en": "snowfall warning", "publication_datetime": "2026-11-22T21:00:42.665Z",
+  "event_end_datetime": "2026-11-23T10:00:00.000Z", "alert_text_en": "Heavy snowfall continues.",
+  "risk_colour_en": "yellow", "feature_name_en": "Fraserdale - Pledger Lake", "status_en": "continued" },
+  "geometry": { "type": "Polygon", "coordinates": [ [ [ -81.7, 49.6 ], [ -81.6, 49.7 ], [ -81.7, 49.6 ] ] ] } },
+{ "type": "Feature", "properties": { "id": "3", "alert_name_en": "blizzard warning", "risk_colour_en": "red",
+  "feature_name_en": "Fraserdale - Pledger Lake", "alert_text_en": "Whiteout." }, "geometry": null },
+{ "type": "Feature", "properties": { "id": "4", "alert_name_en": "snowfall warning", "publication_datetime": "2026-11-22T21:00:42.665Z",
+  "risk_colour_en": "yellow", "feature_name_en": "Fraserdale - Pledger Lake", "alert_text_en": "Heavy snowfall continues." } },
+{ "type": "Feature", "properties": { "id": "5", "alert_name_en": "" } }
+] })";
+    radar::AlertInfo info;
+    std::wstring err;
+    CHECK(radar::ParseAlertInfo(reply, info, err) && err.empty());
+    CHECK(info.count == 3);   // the repeated snowfall warning and the nameless one are dropped
+    CHECK(info.alert[0].name == L"blizzard warning" && info.alert[0].colour == L"red" && info.alert[0].issued == -1);
+    CHECK(info.alert[1].name == L"snowfall warning" && info.alert[1].area == L"Fraserdale - Pledger Lake");
+    CHECK(info.alert[1].issued == radar::ParseIsoUtc("2026-11-22T21:00:42Z") && info.alert[1].ends == radar::ParseIsoUtc("2026-11-23T10:00:00Z"));
+    CHECK(info.alert[2].name == L"special weather statement" && info.alert[2].colour.empty());   // statements last
+    CHECK(info.alert[2].text == L"Heavy rainfall is expected.\n\nLocations: Nova Scotia." && info.alert[2].status == L"continued");
+
+    CHECK(radar::ParseAlertInfo(R"({"type": "FeatureCollection", "name": "Current-Alerts", "features": [ ] })", info, err));
+    CHECK(info.count == 0);   // nothing in effect there is an answer, not an error
+    CHECK(!radar::ParseAlertInfo("<ServiceExceptionReport>msWMSFeatureInfo()</ServiceExceptionReport>", info, err) && !err.empty());
+    CHECK(!radar::ParseAlertInfo(R"({"type": "FeatureCollection", "features": [ { "properties": { "alert_name_en": "x" )", info, err));
+
+    // More alerts than the panel holds: kMaxAlerts of them, a late severe one displacing a mild one.
+    std::string many = R"({"type": "FeatureCollection", "features": [)";
+    for (int i = 0; i < 12; ++i) {
+        many += std::string(i == 0 ? "" : ",") + R"({"properties": {"alert_name_en": "wind warning", "feature_name_en": "area )" +
+                std::to_string(i) + R"(", "risk_colour_en": ")" + (i == 9 ? "orange" : "yellow") + R"("}})";
+    }
+    many += "]}";
+    CHECK(radar::ParseAlertInfo(many, info, err) && info.count == radar::kMaxAlerts);
+    CHECK(info.alert[0].colour == L"orange" && info.alert[0].area == L"area 9");   // the tenth, with the list already full
+    CHECK(info.alert[1].area == L"area 0" && info.alert[radar::kMaxAlerts - 1].area == L"area 6");
+}
+
 void TestConfig() {
     Location loc;
     CHECK(ParseLocation(L"Ottawa, Ontario, CA|45.41117|-75.69812", loc));
@@ -693,6 +749,7 @@ int main(int argc, char** argv) {
     TestForecast();
     TestUpdate();
     TestMap();
+    TestAlertInfo();
     TestParseArchive();
     TestMergeAndCache();
     TestSeries();

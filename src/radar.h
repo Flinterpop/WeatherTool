@@ -72,7 +72,8 @@ std::wstring TileUrl(const Frames& f, size_t frame, int z, int x, int y);
 // apart ending at the latest. False, with why, when there is none.
 bool ParseMscTimes(std::string_view xml, Frames& out, std::wstring& error);
 
-// "2026-11-22T01:54:00Z" to Unix time; -1 when it is not that shape.
+// "2026-11-22T01:54:00Z" (or with fractional seconds, "...:00.422Z") to Unix
+// time; -1 when it is not that shape.
 int64_t ParseIsoUtc(std::string_view s);
 std::wstring IsoUtc(int64_t t);
 
@@ -87,6 +88,36 @@ std::wstring MscTileUrl(MscLayer layer, int64_t time, int z, int x, int y);
 
 // Whether the tile touches the layer's bounding box (no request otherwise).
 bool MscCovers(MscLayer layer, int z, int x, int y);
+
+// What the alerts layer has at one point, from a WMS GetFeatureInfo (JSON).
+// The reply carries each alert's polygon too, so it can run to tens of kB.
+constexpr size_t kMaxAlerts         = 8;
+constexpr size_t kMaxAlertInfoBytes = 1024u * 1024u;
+
+struct Alert {
+    std::wstring name;     // "snowfall warning" (alert_name_en)
+    std::wstring colour;   // "yellow", "orange" or "red"; empty for a statement
+    std::wstring area;     // "Fraserdale - Pledger Lake"
+    std::wstring status;   // "issued", "continued", "updated", ...
+    std::wstring text;     // the bulletin, paragraphs separated by blank lines
+    int64_t issued = -1;   // publication time (Unix), -1 when not given
+    int64_t ends   = -1;   // when the event is expected to end, -1 when not given
+};
+
+struct AlertInfo {
+    std::array<Alert, kMaxAlerts> alert{};
+    size_t count = 0;      // most severe first: red, orange, yellow, then statements
+};
+
+// Whether (lat, lon) is inside the alerts layer's bounding box.
+bool AlertsCoverPoint(double lat, double lon);
+
+// The GetFeatureInfo for the alerts in effect at (lat, lon).
+std::wstring AlertInfoUrl(double lat, double lon);
+
+// The reply to AlertInfoUrl, in English. No alert there is a success with
+// count 0; false, with why, when the reply is not a feature collection.
+bool ParseAlertInfo(std::string_view json, AlertInfo& out, std::wstring& error);
 
 // Which satellite to ask for the tile: GOES-East east of 106°W, GOES-West
 // west of it, each within its own view. False when neither sees the tile.
