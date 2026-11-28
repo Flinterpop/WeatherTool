@@ -11,6 +11,7 @@
 #include "dialogs.h"
 #include "fetcher.h"
 #include "radar.h"
+#include "shapes.h"
 #include "tiles.h"
 #include "update.h"
 #include "webserver.h"
@@ -70,6 +71,18 @@ private:
     void PaintAlertPin(Gdiplus::Graphics& g, const Gdiplus::RectF& r, double ox, double oy);
     void PaintAlertPanel(Gdiplus::Graphics& g, const Gdiplus::RectF& r);
     Gdiplus::REAL AlertPanelBody(Gdiplus::Graphics& g, Gdiplus::REAL x, Gdiplus::REAL y, Gdiplus::REAL w, bool draw);
+    // Shapefiles (shapes.h) over the radar, in the Map menu: each one ticked
+    // on or off, its colour, its place in the drawing order.
+    std::wstring LoadShapeLayers();   // "" or which could not be read, for the status line
+    bool LoadShapeLayer(size_t index);
+    void AddShapefiles();
+    std::vector<std::wstring> PickShapefiles();
+    void OnShapeCommand(int id);
+    void BuildShapeMenu();
+    void SaveShapeLayers();
+    void PaintShapes(Gdiplus::Graphics& g, const Gdiplus::RectF& r, double ox, double oy);
+    void PaintShapeLayer(Gdiplus::Graphics& g, const shapes::Layer& layer, uint32_t rgb, const Gdiplus::RectF& r, double ox,
+                         double oy, double world);
     std::wstring MapCredit() const;
     radar::Source RadarSource() const { return static_cast<radar::Source>(cfg_.state.radarSrc); }
     void InvalidateMap();   // the map and its age label
@@ -167,11 +180,13 @@ private:
     HWND      hNAmerica_ = nullptr;
     HWND      hAlerts_ = nullptr;    // MSC weather alerts on/off
     HWND      hSatellite_ = nullptr; // GOES satellite pictures on/off
+    HWND      hShapes_ = nullptr;    // the shapefile layers on/off
     std::array<HWND, kViewCount> hViews_{};
     std::array<HWND, kRangeYears.size()> hRanges_{};
     std::array<HWND, 3> hMeasures_{};
     std::array<HWND, 12> hMonths_{};
     HMENU     hMenu_ = nullptr;
+    HMENU     hMapMenu_ = nullptr;   // Map: shapefile layers, rebuilt when they change
     HACCEL    hAccel_ = nullptr;
     HFONT     hUiFont_ = nullptr;
     HBRUSH    hBgBrush_ = nullptr;
@@ -220,6 +235,19 @@ private:
         RECT             body{};                 // and its scrolling part
     };
     AlertPanel    alertPanel_;
+    std::array<shapes::Layer, kMaxShapeLayers> shapeLayers_{};   // as cfg_.shapes; empty when it could not be read
+    std::array<std::wstring, kMaxShapeLayers>  shapeErrors_{};   // why not
+    std::vector<Gdiplus::PointF> shapePts_;                      // PaintShapeLayer's scratch, kept between paints
+    uint64_t shapeVersion_ = 0;                                  // + 1 whenever a layer, its colour or the order changes
+    struct ShapeCache {                                          // the layers as last drawn (PaintShapes)
+        std::unique_ptr<Gdiplus::Bitmap> bmp;
+        int      z = -1, w = 0, h = 0;
+        float    scale = 0.0f;
+        uint64_t version = 0;
+        double   ox = 0.0, oy = 0.0;                             // the map's origin in the picture
+    };
+    ShapeCache shapeCache_;
+    std::array<COLORREF, 16>     customColours_{};               // the colour dialog's own row
     struct Marker { RECT hit; size_t index; };
     std::array<Marker, kMaxLocations> markers_{};
     size_t        markerCount_ = 0;

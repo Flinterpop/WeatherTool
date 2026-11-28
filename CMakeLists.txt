@@ -31,6 +31,7 @@ add_library(weathertool_core STATIC
     src/http.cpp
     src/jsonscan.cpp
     src/radar.cpp
+    src/shapes.cpp
     src/slippy.cpp
     src/theme.cpp
     src/units.cpp

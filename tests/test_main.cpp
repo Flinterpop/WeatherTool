@@ -9,6 +9,7 @@
 #include "http.h"
 #include "jsonscan.h"
 #include "radar.h"
+#include "shapes.h"
 #include "slippy.h"
 #include "units.h"
 #include "update.h"
@@ -20,6 +21,8 @@
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -615,12 +618,195 @@ void TestConfig() {
     CHECK(CacheFileFor(back, back.locs[1]) == dir + L"\\cache\\45.4112_-75.6981.csv");
     CHECK(ForecastFileFor(back, back.locs[1]) == dir + L"\\cache\\45.4112_-75.6981.forecast.json");
 
+    // Shapefile layers: one inside the data folder (kept relative), one outside.
+    ShapeLayerCfg sl;
+    CHECK(ParseShapeLayer(L"off|#3366CC|shp\\Canada\\roads.shp", dir, sl) && !sl.on && sl.rgb == 0x3366CC &&
+          sl.path == dir + L"\\shp\\Canada\\roads.shp");
+    CHECK(FormatShapeLayer(sl, dir) == L"off|#3366CC|shp\\Canada\\roads.shp");
+    CHECK(ParseShapeLayer(L"on|#D62728|D:\\maps\\coast.shp", dir, sl) && sl.on && sl.path == L"D:\\maps\\coast.shp");
+    CHECK(ParseShapeLayer(L"on|#D62728|\\\\nas\\maps\\coast.shp", dir, sl) && sl.path == L"\\\\nas\\maps\\coast.shp");
+    CHECK(!ParseShapeLayer(L"on|D62728|x.shp", dir, sl));     // no #
+    CHECK(!ParseShapeLayer(L"on|#D6272|x.shp", dir, sl));     // five digits
+    CHECK(!ParseShapeLayer(L"on|#D62728|", dir, sl));         // no path
+    CHECK(!ParseShapeLayer(L"on|#GGGGGG|x.shp", dir, sl));
+    CHECK(srv.state.shapes && srv.shapeCount == 0);           // defaults
+    srv.shapes[0] = { dir + L"\\shp\\a.shp", 0x111111, true };
+    srv.shapes[1] = { L"D:\\maps\\b & c.shp", 0xFF7F0E, false };
+    srv.shapeCount = 2;
+    srv.state.shapes = false;
+    CHECK(SaveShapes(srv, err) && SaveState(srv, err));
+    Config shp;
+    CHECK(LoadConfig(dir, shp, err) && shp.shapeCount == 2 && !shp.state.shapes);
+    CHECK(shp.shapes[0].path == dir + L"\\shp\\a.shp" && shp.shapes[0].on && shp.shapes[0].rgb == 0x111111);
+    CHECK(shp.shapes[1].path == L"D:\\maps\\b & c.shp" && !shp.shapes[1].on && shp.shapes[1].rgb == 0xFF7F0E);
+    shp.shapeCount = 0;
+    CHECK(SaveShapes(shp, err));
+    Config none;
+    CHECK(LoadConfig(dir, none, err) && none.shapeCount == 0);
+
     std::string bytes;
     CHECK(WriteFileBytes(dir + L"\\x.bin", "abc", err) && ReadFileBytes(dir + L"\\x.bin", bytes, 16, err) && bytes == "abc");
     CHECK(!ReadFileBytes(dir + L"\\x.bin", bytes, 2, err));   // over the size cap
     DeleteFileW((dir + L"\\x.bin").c_str());
     DeleteFileW(cfg.path.c_str());
     RemoveDirectoryW((dir + L"\\cache").c_str());
+    RemoveDirectoryW(dir.c_str());
+}
+
+// A shapefile built byte by byte, from the ESRI description: a 100-byte
+// header, then records of a big-endian header and a little-endian body.
+struct ShpBuilder {
+    std::string s;
+    explicit ShpBuilder(int type) {
+        s.assign(100, '\0');
+        PutBe(0, 9994);
+        std::memcpy(&s[28], &kVersion, 4);
+        std::memcpy(&s[32], &type, 4);
+    }
+    static constexpr int32_t kVersion = 1000;
+    void PutBe(size_t at, uint32_t v) {
+        for (size_t k = 0; k < 4; ++k) { s[at + k] = static_cast<char>((v >> (24 - 8 * k)) & 0xFF); }
+    }
+    static void I32(std::string& b, int32_t v) { b.append(reinterpret_cast<const char*>(&v), 4); }
+    static void F64(std::string& b, double v) { b.append(reinterpret_cast<const char*>(&v), 8); }
+    void Record(const std::string& body) {
+        const size_t at = s.size();
+        s.append(8, '\0');
+        PutBe(at, static_cast<uint32_t>(at));   // the record number is not read
+        PutBe(at + 4, static_cast<uint32_t>(body.size() / 2));
+        s += body;
+    }
+    // A PolyLine (3) or Polygon (5) of parts of (lon, lat) points.
+    void Poly(int type, const std::vector<std::vector<std::pair<double, double>>>& parts) {
+        std::string b;
+        I32(b, type);
+        for (int k = 0; k < 4; ++k) { F64(b, 0.0); }   // the record's box is not read
+        int32_t n = 0;
+        for (const auto& p : parts) { n += static_cast<int32_t>(p.size()); }
+        I32(b, static_cast<int32_t>(parts.size()));
+        I32(b, n);
+        int32_t first = 0;
+        for (const auto& p : parts) { I32(b, first); first += static_cast<int32_t>(p.size()); }
+        for (const auto& p : parts) {
+            for (const auto& pt : p) { F64(b, pt.first); F64(b, pt.second); }
+        }
+        if (type > 10) { for (int k = 0; k < 2 + n; ++k) { F64(b, 0.0); } }   // Z (or M) range and values, ignored
+        Record(b);
+    }
+    std::string Done() {
+        PutBe(24, static_cast<uint32_t>(s.size() / 2));
+        return s;
+    }
+};
+
+void TestShapes() {
+    using namespace wt::shapes;
+    std::wstring err;
+    Layer L;
+    {   // two lines, a null shape between them
+        ShpBuilder b(3);
+        b.Poly(3, { { { -75.7, 45.4 }, { -73.6, 45.5 } }, { { -79.4, 43.7 }, { -79.0, 43.8 }, { -78.9, 44.0 } } });
+        std::string nul;
+        ShpBuilder::I32(nul, 0);
+        b.Record(nul);
+        b.Poly(3, { { { 10.0, -5.0 }, { 11.0, -6.0 } } });
+        CHECK(Parse(b.Done(), L, err));
+        CHECK(L.kind == Kind::Line && L.records.size() == 2 && L.parts.size() == 3 && L.Points() == 7);
+        CHECK(L.records[0].partCount == 2 && L.records[1].firstPart == 2 && L.parts[1].first == 2 && L.parts[1].count == 3);
+        CHECK(Near(L.records[0].box.x0, -79.4, 1e-4) && Near(L.records[0].box.x1, -73.6, 1e-4) && Near(L.records[0].box.y1, 45.5, 1e-4));
+        CHECK(Near(L.box.x0, -79.4, 1e-4) && Near(L.box.x1, 11.0, 1e-4) && Near(L.box.y0, -6.0, 1e-4) && Near(L.box.y1, 45.5, 1e-4));
+        ToMercator(L);
+        CHECK(Near(L.xy[0], (-75.7 + 180.0) / 360.0, 1e-6));
+        CHECK(Near(L.xy[1], slippy::LatToY(45.4, 0) / 256.0, 1e-6));
+        CHECK(L.box.x0 < L.box.x1 && L.box.y0 < L.box.y1);
+        CHECK(Near(L.box.y0, slippy::LatToY(45.5, 0) / 256.0, 1e-6));   // north is the smaller y
+        CHECK(Near(L.records[1].box.y1, slippy::LatToY(-6.0, 0) / 256.0, 1e-6));
+    }
+    {   // a PolygonZ: a ring with a hole, Z values skipped
+        ShpBuilder b(15);
+        b.Poly(15, { { { 0, 0 }, { 0, 10 }, { 10, 10 }, { 10, 0 }, { 0, 0 } }, { { 2, 2 }, { 8, 2 }, { 8, 8 }, { 2, 2 } } });
+        b.Poly(15, { { { 20, 20 }, { 20, 21 }, { 21, 21 }, { 20, 20 } } });
+        CHECK(Parse(b.Done(), L, err) && L.kind == Kind::Polygon && L.records.size() == 2 && L.records[0].partCount == 2);
+        CHECK(L.Points() == 13 && Near(L.xy[24], 20.0) && Near(L.xy[25], 20.0));
+    }
+    {   // points and multipoints
+        ShpBuilder b(1);
+        std::string p;
+        ShpBuilder::I32(p, 1);
+        ShpBuilder::F64(p, -75.0);
+        ShpBuilder::F64(p, 45.0);
+        b.Record(p);
+        CHECK(Parse(b.Done(), L, err) && L.kind == Kind::Point && L.Points() == 1 && Near(L.xy[1], 45.0));
+        ShpBuilder m(8);
+        std::string mp;
+        ShpBuilder::I32(mp, 8);
+        for (int k = 0; k < 4; ++k) { ShpBuilder::F64(mp, 0.0); }
+        ShpBuilder::I32(mp, 2);
+        for (double v : { 1.0, 2.0, 3.0, 4.0 }) { ShpBuilder::F64(mp, v); }
+        m.Record(mp);
+        CHECK(Parse(m.Done(), L, err) && L.kind == Kind::Point && L.records.size() == 1 && L.Points() == 2 && Near(L.xy[3], 4.0));
+    }
+    // What is refused, each with a reason.
+    CHECK(!Parse("not a shapefile", L, err) && !err.empty());
+    {
+        ShpBuilder b(31);   // MultiPatch
+        CHECK(!Parse(b.Done(), L, err) && err.find(L"31") != std::wstring::npos);
+    }
+    {
+        ShpBuilder b(3);
+        CHECK(!Parse(b.Done(), L, err) && err == L"it holds no shapes");
+    }
+    {   // cut short: the header says longer than the record that is there
+        ShpBuilder b(3);
+        b.Poly(3, { { { 0, 0 }, { 1, 1 } } });
+        std::string s = b.Done();
+        s.resize(s.size() - 8);
+        b.s = s;
+        b.PutBe(24, static_cast<uint32_t>((s.size() + 8) / 2));
+        CHECK(!Parse(b.s, L, err) && err == L"it is cut short");
+    }
+    {   // a part count that does not fit the record
+        ShpBuilder b(3);
+        b.Poly(3, { { { 0, 0 }, { 1, 1 } } });
+        std::string s = b.Done();
+        const int32_t many = 1000;
+        std::memcpy(&s[100 + 8 + 36], &many, 4);
+        CHECK(!Parse(s, L, err) && !err.empty());
+    }
+    {   // a record of another shape type
+        ShpBuilder b(3);
+        b.Poly(5, { { { 0, 0 }, { 1, 1 }, { 1, 0 }, { 0, 0 } } });
+        CHECK(!Parse(b.Done(), L, err) && err.find(L"differs") != std::wstring::npos);
+    }
+    {   // a point that is not a number
+        ShpBuilder b(3);
+        b.Poly(3, { { { 0, 0 }, { std::nan(""), 1 } } });
+        CHECK(!Parse(b.Done(), L, err));
+    }
+
+    CHECK(PrjIsGeographic("GEOGCS[\"GCS_WGS_1984\",DATUM[...]]", err));
+    CHECK(PrjIsGeographic("\xEF\xBB\xBF  GEOGCS[\"GCS_North_American_1983_CSRS98\"]", err));
+    CHECK(!PrjIsGeographic("PROJCS[\"NAD_1983_UTM_Zone_18N\",GEOGCS[...]]", err) && err.find(L"projected") != std::wstring::npos);
+    CHECK(!PrjIsGeographic("", err));
+    CHECK(NameOf(L"C:\\maps\\15M_shoreline_1.shp") == L"15M_shoreline_1" && NameOf(L"a/b.c.shp") == L"b.c" && NameOf(L"x") == L"x");
+
+    // Load: the .prj beside the .shp decides; without one, the extent does.
+    wchar_t tmp[MAX_PATH] = {};
+    CHECK(GetTempPathW(MAX_PATH, tmp) > 0);
+    const std::wstring dir = std::wstring(tmp) + L"weathertool_shp_" + std::to_wstring(GetCurrentProcessId());
+    CHECK(CreateDirectoryW(dir.c_str(), nullptr) != 0);
+    ShpBuilder deg(3);
+    deg.Poly(3, { { { -75.7, 45.4 }, { -73.6, 45.5 } } });
+    ShpBuilder metres(3);
+    metres.Poly(3, { { { 445000.0, 5030000.0 }, { 446000.0, 5031000.0 } } });
+    CHECK(WriteFileBytes(dir + L"\\deg.shp", deg.Done(), err) && WriteFileBytes(dir + L"\\m.shp", metres.Done(), err));
+    CHECK(Load(dir + L"\\deg.shp", L, err) && L.Points() == 2);   // no .prj, in degrees
+    CHECK(!Load(dir + L"\\m.shp", L, err) && L.records.empty());  // no .prj, not degrees
+    CHECK(WriteFileBytes(dir + L"\\deg.prj", "PROJCS[\"UTM\"]", err));
+    CHECK(!Load(dir + L"\\deg.shp", L, err) && err.find(L"projected") != std::wstring::npos);
+    CHECK(WriteFileBytes(dir + L"\\deg.prj", "GEOGCS[\"GCS_WGS_1984\"]", err) && Load(dir + L"\\deg.shp", L, err));
+    CHECK(!Load(dir + L"\\missing.shp", L, err) && !err.empty());
+    for (const wchar_t* f : { L"\\deg.shp", L"\\deg.prj", L"\\m.shp" }) { DeleteFileW((dir + f).c_str()); }
     RemoveDirectoryW(dir.c_str());
 }
 
@@ -750,6 +936,7 @@ int main(int argc, char** argv) {
     TestUpdate();
     TestMap();
     TestAlertInfo();
+    TestShapes();
     TestParseArchive();
     TestMergeAndCache();
     TestSeries();

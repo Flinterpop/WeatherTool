@@ -33,13 +33,24 @@ struct ViewState {
     int    radarSrc  = 0;     // radar::Source: 0 world (RainViewer), 1 North America (MSC GeoMet)
     bool   alerts    = false; // MSC's weather alerts (Canada) under the radar
     bool   satellite = false; // GOES satellite pictures over the base map
-    int    view      = 0;     // View
+    bool   shapes    = true;  // the shapefile layers that are ticked, over the radar
+    int    view     = 0;     // View
     int    month     = 0;     // 0..11, for View::Month
     int    measure   = 0;     // Var::Mean / High / Low
     int    range     = 0;     // index into kRangeYears
     bool   hasPlacement = false;
     RECT   placement{};       // normal (restored) window rectangle
     bool   maximized = false;
+};
+
+// A shapefile drawn on the Map tab, in [shapes] as "1=on|#3366CC|path".
+// A path inside the data folder is kept relative to it, so a portable copy
+// that is moved with its shapefiles still finds them.
+constexpr size_t kMaxShapeLayers = 16;
+struct ShapeLayerCfg {
+    std::wstring path;          // full path of the .shp
+    uint32_t     rgb = 0;       // 0xRRGGBB
+    bool         on  = true;
 };
 
 struct Config {
@@ -52,6 +63,8 @@ struct Config {
     int          serverPort    = 8765;    // [server] port, 1..65535
     std::array<Location, kMaxLocations> locs{};
     size_t       locCount = 0;
+    std::array<ShapeLayerCfg, kMaxShapeLayers> shapes{};
+    size_t       shapeCount = 0;
     ViewState    state;
 };
 
@@ -70,6 +83,11 @@ bool SaveSettings(const Config& cfg, std::wstring& err);
 bool SaveServer(const Config& cfg, std::wstring& err);
 bool SaveLocations(const Config& cfg, std::wstring& err);
 bool SaveState(const Config& cfg, std::wstring& err);
+bool SaveShapes(const Config& cfg, std::wstring& err);
+
+// One [shapes] entry's value, `dir` being the data folder.
+bool         ParseShapeLayer(const std::wstring& value, const std::wstring& dir, ShapeLayerCfg& out);
+std::wstring FormatShapeLayer(const ShapeLayerCfg& layer, const std::wstring& dir);
 
 // "Ottawa, Ontario, CA|45.41117|-75.69812"
 bool         ParseLocation(const std::wstring& line, Location& out);

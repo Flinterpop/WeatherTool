@@ -7,6 +7,7 @@
 
 #include <commctrl.h>
 #include <commdlg.h>
+#include <cderr.h>
 #include <dwmapi.h>
 #include <shellapi.h>
 #include <uxtheme.h>
@@ -47,7 +48,16 @@ enum : int {
     IDC_LIST = 200, IDC_ADD, IDC_REMOVE, IDC_UPDATE, IDC_UNITS,
     IDC_VIEW0 = 210, IDC_RANGE0 = 220, IDC_MEASURE0 = 230, IDC_MONTH0 = 240, IDC_TAB0 = 250,
     IDC_RADAR = 260, IDC_PREV, IDC_PLAY, IDC_NEXT, IDC_ZOOMOUT, IDC_ZOOMIN, IDC_WORLD, IDC_NAMERICA, IDC_ALERTS, IDC_SATELLITE,
+    IDC_SHAPES,
+    IDM_SHAPEADD = 280,
+    IDM_SHAPE0 = 300,                                  // + 4 * layer + ShapeAction
 };
+enum ShapeAction : int { kShapeShow = 0, kShapeColour, kShapeUp, kShapeRemove, kShapeActions };
+static_assert(IDM_SHAPE0 + kShapeActions * static_cast<int>(kMaxShapeLayers) <= 400);
+
+// Shapefile layers' first colours, in the order they are handed out: strong
+// ones that stand off the radar's blues and greens and the map's pale ground.
+constexpr std::array<uint32_t, 8> kShapeColours = { 0xD62728, 0x9467BD, 0x111111, 0xFF7F0E, 0xE377C2, 0x8C564B, 0x17BECF, 0x7F7F7F };
 
 constexpr UINT_PTR kUpdateTimer   = 1;
 constexpr UINT     kUpdateEveryMs = 30u * 60u * 1000u;
@@ -473,6 +483,8 @@ void App::OnCreate() {
     AppendMenuW(hMenu_, MF_POPUP, reinterpret_cast<UINT_PTR>(file), L"&File");
     AppendMenuW(hMenu_, MF_POPUP, reinterpret_cast<UINT_PTR>(place), L"&Place");
     AppendMenuW(hMenu_, MF_POPUP, reinterpret_cast<UINT_PTR>(view), L"&View");
+    hMapMenu_ = CreatePopupMenu();   // filled by BuildShapeMenu
+    AppendMenuW(hMenu_, MF_POPUP, reinterpret_cast<UINT_PTR>(hMapMenu_), L"&Map");
     AppendMenuW(hMenu_, MF_POPUP, reinterpret_cast<UINT_PTR>(help), L"&Help");
     SetMenu(hwnd_, hMenu_);
 
@@ -504,6 +516,7 @@ void App::OnCreate() {
 
     std::wstring tileErr;
     tilesOk_ = tiles_.Start(hwnd_, cfg_.cacheDir, tileErr);   // the Map tab says so if this failed
+    const std::wstring shapeNote = LoadShapeLayers();
 
     ApplyTheme();
     RebuildList();
@@ -511,6 +524,8 @@ void App::OnCreate() {
     Layout();
     status_ = cfg_.locCount == 0 ? L"Add a place to begin (Place > Add, or the Add button)." : L"Ready.";
     if (!dataNote_.empty()) { status_ += L" (" + dataNote_ + L")"; }
+    if (!shapeNote.empty()) { status_ += L" " + shapeNote; }
+    BuildShapeMenu();
     if (cfg_.serverEnabled) { (void)StartWebServer(false); }   // remembered from last time
 }
 
@@ -713,6 +728,7 @@ void App::CreateControls() {
     hNAmerica_ = button(L"N. America", IDC_NAMERICA, true);
     hAlerts_  = button(L"Alerts", IDC_ALERTS, true);
     hSatellite_ = button(L"Satellite", IDC_SATELLITE, true);
+    hShapes_  = button(L"Shapes", IDC_SHAPES, true);
 }
 
 void App::Layout() {
@@ -756,7 +772,7 @@ void App::Layout() {
     }
     // At the right, leftwards: zoom in, zoom out, then Alerts and the radar source pair.
     struct Right { HWND h; int w; int after; };   // `after`: extra space to its left
-    const Right mapRight[] = { { hZoomIn_, 36, 0 }, { hZoomOut_, 36, 12 }, { hAlerts_, kMapBtnW, 0 }, { hSatellite_, 72, 12 },
+    const Right mapRight[] = { { hZoomIn_, 36, 0 }, { hZoomOut_, 36, 12 }, { hShapes_, 66, 0 }, { hAlerts_, kMapBtnW, 0 }, { hSatellite_, 72, 12 },
                                { hNAmerica_, 84, 0 }, { hWorld_, kMapBtnW, 0 } };
     int rx = r0;
     for (const Right& b : mapRight) {
@@ -833,6 +849,7 @@ void App::SyncControls() {
     EnableWindow(hNAmerica_, s.radar);
     SetCheck(hAlerts_, s.alerts);
     SetCheck(hSatellite_, s.satellite);
+    SetCheck(hShapes_, s.shapes && cfg_.shapeCount > 0);
     SetCheck(hPlay_, playing_);
     const bool frames = StepCount() > 1;
     EnableWindow(hPrev_, frames);
@@ -878,7 +895,7 @@ void App::ApplyTheme() {
     for (HWND h : hRanges_) { SetWindowTheme(h, sub, nullptr); }
     for (HWND h : hMeasures_) { SetWindowTheme(h, sub, nullptr); }
     for (HWND h : hMonths_) { SetWindowTheme(h, sub, nullptr); }
-    HWND mapButtons[] = { hRadar_, hPrev_, hPlay_, hNext_, hZoomOut_, hZoomIn_, hWorld_, hNAmerica_, hAlerts_, hSatellite_ };
+    HWND mapButtons[] = { hRadar_, hPrev_, hPlay_, hNext_, hZoomOut_, hZoomIn_, hWorld_, hNAmerica_, hAlerts_, hSatellite_, hShapes_ };
     for (HWND h : mapButtons) { SetWindowTheme(h, sub, nullptr); }
     RedrawWindow(hwnd_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
 }
@@ -1220,6 +1237,7 @@ void App::OnCommand(int id, int code) {
     if (id >= IDC_TAB0 && id < IDC_TAB0 + kTabCount) { SetTab(id - IDC_TAB0); return; }
     if (id == IDM_TAB0 || id == IDM_TAB1) { SetTab(id - IDM_TAB0); return; }
     if (id == IDM_TABMAP) { SetTab(static_cast<int>(Tab::Map)); return; }
+    if (id >= IDM_SHAPE0 && id < IDM_SHAPE0 + kShapeActions * static_cast<int>(kMaxShapeLayers)) { OnShapeCommand(id); return; }
     switch (id) {   // Map tab buttons
     case IDC_RADAR:
         cfg_.state.radar = !cfg_.state.radar;
@@ -1261,6 +1279,18 @@ void App::OnCommand(int id, int code) {
         SyncControls();
         InvalidateMap();
         return;
+    case IDC_SHAPES:
+        if (cfg_.shapeCount == 0) {   // nothing to show yet: ask for some
+            SetCheck(hShapes_, false);
+            AddShapefiles();
+            return;
+        }
+        cfg_.state.shapes = !cfg_.state.shapes;
+        SyncControls();
+        BuildShapeMenu();
+        InvalidateMap();
+        return;
+    case IDM_SHAPEADD: AddShapefiles(); return;
     case IDC_PREV:    SetPlaying(false); StepFrame(-1); return;
     case IDC_NEXT:    SetPlaying(false); StepFrame(+1); return;
     case IDC_PLAY:    SetPlaying(!playing_); return;
@@ -1455,6 +1485,8 @@ void App::OnLButtonUp(int x, int y) {
         } else if (cfg_.state.alerts) {
             AskAlertsAt(x, y);
         }
+    } else if (cfg_.state.shapes && cfg_.shapeCount > 0) {
+        InvalidateMap();   // the shapes slid along during the drag: draw them afresh
     }
 }
 
@@ -1506,7 +1538,7 @@ void App::OnDpiChanged(WPARAM wp, LPARAM lp) {
     for (HWND h : hRanges_) { setFont(h); }
     for (HWND h : hMeasures_) { setFont(h); }
     for (HWND h : hMonths_) { setFont(h); }
-    HWND mapButtons[] = { hRadar_, hPrev_, hPlay_, hNext_, hZoomOut_, hZoomIn_, hWorld_, hNAmerica_, hAlerts_, hSatellite_ };
+    HWND mapButtons[] = { hRadar_, hPrev_, hPlay_, hNext_, hZoomOut_, hZoomIn_, hWorld_, hNAmerica_, hAlerts_, hSatellite_, hShapes_ };
     for (HWND h : mapButtons) { setFont(h); }
     SendMessageW(hList_, LB_SETITEMHEIGHT, 0, Px(kItemH));
     const RECT* r = reinterpret_cast<const RECT*>(lp);
@@ -2369,6 +2401,7 @@ void App::PaintMap(Graphics& g) {
     if (cfg_.state.satellite && frames_.satLatest > 0) { PaintSatellite(g, r, ox, oy); }
     if (cfg_.state.alerts) { PaintAlerts(g, r, ox, oy); }
     if (cfg_.state.radar && frames_.count > 0) { PaintRadar(g, r, ox, oy); }
+    if (cfg_.state.shapes) { PaintShapes(g, r, ox, oy); }
     PaintMarkers(g, r, ox, oy);
     if (alertPanel_.open) { PaintAlertPin(g, r, ox, oy); }
     g.ResetClip();
@@ -2670,6 +2703,11 @@ void App::PaintMapOverlays(Graphics& g, const RectF& r) {
             t += b.data();
         }
     }
+    if (cfg_.state.shapes) {   // a saved shapefile that is gone stays listed, so say so where it would show
+        size_t unread = 0;
+        for (size_t i = 0; i < cfg_.shapeCount; ++i) { unread += cfg_.shapes[i].on && !shapeErrors_[i].empty() ? 1u : 0u; }
+        if (unread > 0) { t += L" · " + std::to_wstring(unread) + (unread == 1 ? L" shapefile" : L" shapefiles") + L" not read (Map menu)"; }
+    }
     const RectF top = box(t, fb, r.X + 8.0f * s, r.Y + 8.0f * s, false);
 
     // Bottom right: the credits (OpenStreetMap, RainViewer and ECCC all require them on the map).
@@ -2712,6 +2750,360 @@ void App::PaintMapOverlays(Graphics& g, const RectF& r) {
 }
 
 // The credits for what the map is showing now.
+// ---------------------------------------------------------------------------
+// Shapefile layers over the radar. cfg_.shapes lists them, the first drawn
+// on top; shapeLayers_ holds each one's points, read once.
+
+namespace {
+
+// The first colour no layer has, else the next round the list.
+uint32_t NextShapeColour(const Config& c) {
+    assert(c.shapeCount <= kMaxShapeLayers);
+    for (uint32_t rgb : kShapeColours) {
+        bool used = false;
+        for (size_t i = 0; i < c.shapeCount; ++i) { used = used || c.shapes[i].rgb == rgb; }
+        if (!used) { return rgb; }
+    }
+    return kShapeColours[c.shapeCount % kShapeColours.size()];
+}
+
+std::wstring MenuText(const std::wstring& s) {   // a literal & doubled
+    std::wstring out;
+    for (wchar_t ch : s) { out += ch == L'&' ? std::wstring(L"&&") : std::wstring(1, ch); }
+    return out;
+}
+
+bool NearView(const PointF& a, const PointF& b, const RectF& v) {
+    return std::max(a.X, b.X) >= v.X && std::min(a.X, b.X) <= v.X + v.Width && std::max(a.Y, b.Y) >= v.Y &&
+           std::min(a.Y, b.Y) <= v.Y + v.Height;
+}
+
+// One line part into `path`: only the stretches near the view (GDI+ is slow
+// with, and can refuse, points far off it), and a point within a pixel of
+// the one kept before it is left out.
+void AddLinePart(GraphicsPath& path, const float* xy, uint32_t count, double sx, double oy, double world, const RectF& view,
+                 std::vector<PointF>& run) {
+    assert(xy != nullptr && world > 0.0);
+    run.clear();
+    auto flush = [&] {
+        if (run.size() >= 2) {
+            path.StartFigure();
+            path.AddLines(run.data(), static_cast<INT>(run.size()));
+        }
+        run.clear();
+    };
+    PointF prev;
+    for (uint32_t k = 0; k < count; ++k) {
+        const PointF p(static_cast<REAL>(sx + xy[2 * k] * world), static_cast<REAL>(oy + xy[2 * k + 1] * world));
+        if (k > 0 && NearView(prev, p, view)) {
+            if (run.empty()) { run.push_back(prev); }
+            if (k + 1 == count || std::fabs(p.X - run.back().X) >= 1.0f || std::fabs(p.Y - run.back().Y) >= 1.0f) { run.push_back(p); }
+        } else if (k > 0) {
+            flush();
+        }
+        prev = p;
+    }
+    flush();
+}
+
+// One polygon ring into `path`, thinned the same way; a ring under a pixel
+// across adds nothing.
+void AddRing(GraphicsPath& path, const float* xy, uint32_t count, double sx, double oy, double world, std::vector<PointF>& pts) {
+    assert(xy != nullptr && world > 0.0);
+    pts.clear();
+    for (uint32_t k = 0; k < count; ++k) {
+        const PointF p(static_cast<REAL>(sx + xy[2 * k] * world), static_cast<REAL>(oy + xy[2 * k + 1] * world));
+        if (!pts.empty() && std::fabs(p.X - pts.back().X) < 1.0f && std::fabs(p.Y - pts.back().Y) < 1.0f) { continue; }
+        pts.push_back(p);
+    }
+    if (pts.size() >= 3) { path.AddPolygon(pts.data(), static_cast<INT>(pts.size())); }
+}
+
+} // namespace
+
+std::wstring App::LoadShapeLayers() {
+    assert(cfg_.shapeCount <= kMaxShapeLayers);
+    std::wstring failed;
+    for (size_t i = 0; i < cfg_.shapeCount; ++i) {
+        if (!LoadShapeLayer(i)) { failed += (failed.empty() ? L"" : L", ") + shapes::NameOf(cfg_.shapes[i].path); }
+    }
+    return failed.empty() ? failed : L"Shapefiles not read (see the Map menu): " + failed + L".";
+}
+
+bool App::LoadShapeLayer(size_t index) {
+    assert(index < cfg_.shapeCount);
+    shapes::Layer& layer = shapeLayers_[index];
+    if (!shapes::Load(cfg_.shapes[index].path, layer, shapeErrors_[index])) {
+        layer = shapes::Layer{};
+        return false;
+    }
+    shapes::ToMercator(layer);
+    shapeErrors_[index].clear();
+    return true;
+}
+
+void App::SaveShapeLayers() {
+    std::wstring err;
+    if (!SaveShapes(cfg_, err)) { SetStatus(L"The shapefile list was not saved: " + err); }
+}
+
+// Map menu: Add, Show, then a submenu per layer (Show, Colour, Move up, Remove).
+void App::BuildShapeMenu() {
+    if (hMapMenu_ == nullptr) { return; }
+    const int items = GetMenuItemCount(hMapMenu_);
+    for (int k = 0; k < items; ++k) { DeleteMenu(hMapMenu_, 0, MF_BYPOSITION); }   // destroys the old submenus too
+    const bool any = cfg_.shapeCount > 0;
+    AppendMenuW(hMapMenu_, MF_STRING, IDM_SHAPEADD, L"&Add shapefiles...");
+    AppendMenuW(hMapMenu_, MF_STRING | (any ? 0u : MF_GRAYED) | (any && cfg_.state.shapes ? MF_CHECKED : 0u), IDC_SHAPES,
+                L"&Show shapefiles");
+    if (!any) { return; }
+    AppendMenuW(hMapMenu_, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(hMapMenu_, MF_STRING | MF_GRAYED, 0, L"Layers (the first is drawn on top):");
+    for (size_t i = 0; i < cfg_.shapeCount; ++i) {
+        const ShapeLayerCfg& c = cfg_.shapes[i];
+        const UINT base = static_cast<UINT>(IDM_SHAPE0 + kShapeActions * static_cast<int>(i));
+        const bool ok = shapeErrors_[i].empty();
+        HMENU sub = CreatePopupMenu();
+        if (!ok) {
+            AppendMenuW(sub, MF_STRING | MF_GRAYED, 0, MenuText(L"Could not be read: " + shapeErrors_[i]).c_str());
+            AppendMenuW(sub, MF_STRING | MF_GRAYED, 0, MenuText(c.path).c_str());
+            AppendMenuW(sub, MF_SEPARATOR, 0, nullptr);
+        }
+        AppendMenuW(sub, MF_STRING | (c.on ? MF_CHECKED : 0u), base + kShapeShow, L"&Show");
+        AppendMenuW(sub, MF_STRING, base + kShapeColour, L"&Colour...");
+        AppendMenuW(sub, MF_STRING | (i == 0 ? MF_GRAYED : 0u), base + kShapeUp, L"Move &up (drawn over the one above)");
+        AppendMenuW(sub, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(sub, MF_STRING, base + kShapeRemove, L"&Remove");
+        const std::wstring file = c.path.substr(c.path.find_last_of(L"\\/") + 1);   // npos + 1 is 0
+        const bool shp = file.size() > 4 && _wcsicmp(file.c_str() + file.size() - 4, L".shp") == 0;
+        std::wstring label = (i < 9 ? L"&" + std::to_wstring(i + 1) + L"  " : L"    ") + MenuText(shp ? shapes::NameOf(c.path) : file);
+        if (!ok) { label += L"  (could not be read)"; }
+        AppendMenuW(hMapMenu_, MF_POPUP | (c.on && ok ? MF_CHECKED : 0u), reinterpret_cast<UINT_PTR>(sub), label.c_str());
+    }
+}
+
+// The open dialog, several files allowed: their full paths, none if cancelled.
+std::vector<std::wstring> App::PickShapefiles() {
+    std::vector<wchar_t> buf(32768, L'\0');
+    const std::wstring& last = cfg_.shapeCount > 0 ? cfg_.shapes[cfg_.shapeCount - 1].path : cfg_.dir;
+    const std::wstring initial = cfg_.shapeCount > 0 ? last.substr(0, last.find_last_of(L"\\/")) : last;
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize     = sizeof(ofn);
+    ofn.hwndOwner       = hwnd_;
+    ofn.lpstrFilter     = L"Shapefiles (*.shp)\0*.shp\0All files (*.*)\0*.*\0";
+    ofn.lpstrFile       = buf.data();
+    ofn.nMaxFile        = static_cast<DWORD>(buf.size());
+    ofn.lpstrInitialDir = initial.c_str();
+    ofn.lpstrTitle      = L"Add shapefiles to the map";
+    ofn.Flags = OFN_EXPLORER | OFN_ALLOWMULTISELECT | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR;
+    std::vector<std::wstring> paths;
+    if (!GetOpenFileNameW(&ofn)) {
+        if (CommDlgExtendedError() == FNERR_BUFFERTOOSMALL) { SetStatus(L"Too many files picked at once: pick fewer."); }
+        return paths;
+    }
+    // One file: its full path. Several: the folder, then each name.
+    const std::wstring first(buf.data());
+    size_t p = first.size() + 1;
+    if (p >= buf.size() || buf[p] == L'\0') { paths.push_back(first); }
+    for (size_t n = 0; p < buf.size() && buf[p] != L'\0' && n < 256; ++n) {
+        const std::wstring name(buf.data() + p);
+        paths.push_back(first + L"\\" + name);
+        p += name.size() + 1;
+    }
+    assert(!paths.empty());
+    return paths;
+}
+
+void App::AddShapefiles() {
+    if (cfg_.shapeCount >= kMaxShapeLayers) {
+        MessageBoxW(hwnd_, L"WeatherTool draws at most 16 shapefiles. Remove one first (Map menu).", kAppName, MB_ICONINFORMATION);
+        return;
+    }
+    const std::vector<std::wstring> paths = PickShapefiles();
+    if (paths.empty()) { return; }
+    HCURSOR old = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
+    std::wstring problems;
+    size_t added = 0;
+    for (const std::wstring& path : paths) {
+        const std::wstring name = path.substr(path.find_last_of(L"\\/") + 1);   // with its extension: a .dbf is not its .shp
+        bool dup = false;
+        for (size_t i = 0; i < cfg_.shapeCount; ++i) { dup = dup || _wcsicmp(cfg_.shapes[i].path.c_str(), path.c_str()) == 0; }
+        if (dup) { problems += name + L": already on the map\n"; continue; }
+        if (cfg_.shapeCount >= kMaxShapeLayers) { problems += name + L": not added, 16 at most\n"; continue; }
+        const size_t i = cfg_.shapeCount;
+        cfg_.shapes[i] = ShapeLayerCfg{ path, NextShapeColour(cfg_), true };
+        ++cfg_.shapeCount;
+        if (!LoadShapeLayer(i)) {
+            problems += name + L": " + shapeErrors_[i] + L"\n";
+            cfg_.shapes[i] = ShapeLayerCfg{};
+            shapeErrors_[i].clear();
+            --cfg_.shapeCount;
+            continue;
+        }
+        ++added;
+    }
+    SetCursor(old);
+    if (added > 0) {
+        ++shapeVersion_;
+        cfg_.state.shapes = true;
+        SaveShapeLayers();
+        BuildShapeMenu();
+        if (!MapTab()) { SetTab(static_cast<int>(Tab::Map)); }
+        SyncControls();
+        InvalidateMap();
+        SetStatus(added == 1 ? L"Shapefile added: " + shapes::NameOf(cfg_.shapes[cfg_.shapeCount - 1].path) + L"."
+                             : std::to_wstring(added) + L" shapefiles added.");
+    }
+    if (!problems.empty()) { MessageBoxW(hwnd_, (L"Not added:\n\n" + problems).c_str(), kAppName, MB_ICONWARNING); }
+}
+
+void App::OnShapeCommand(int id) {
+    const int k = id - IDM_SHAPE0;
+    assert(k >= 0 && k < kShapeActions * static_cast<int>(kMaxShapeLayers));
+    const size_t i = static_cast<size_t>(k / kShapeActions);
+    if (i >= cfg_.shapeCount) { return; }
+    ShapeLayerCfg& c = cfg_.shapes[i];
+    switch (k % kShapeActions) {
+    case kShapeShow:
+        c.on = !c.on;
+        if (c.on) { cfg_.state.shapes = true; }   // ticking one shows it, even with Shapes off
+        break;
+    case kShapeColour: {
+        CHOOSECOLORW cc{};
+        cc.lStructSize  = sizeof(cc);
+        cc.hwndOwner    = hwnd_;
+        cc.rgbResult    = RGB((c.rgb >> 16) & 0xFF, (c.rgb >> 8) & 0xFF, c.rgb & 0xFF);
+        cc.lpCustColors = customColours_.data();
+        cc.Flags        = CC_RGBINIT | CC_FULLOPEN;
+        if (!ChooseColorW(&cc)) { return; }
+        c.rgb = (static_cast<uint32_t>(GetRValue(cc.rgbResult)) << 16) | (static_cast<uint32_t>(GetGValue(cc.rgbResult)) << 8) |
+                GetBValue(cc.rgbResult);
+        break;
+    }
+    case kShapeUp:
+        if (i == 0) { return; }
+        std::swap(cfg_.shapes[i], cfg_.shapes[i - 1]);
+        std::swap(shapeLayers_[i], shapeLayers_[i - 1]);
+        std::swap(shapeErrors_[i], shapeErrors_[i - 1]);
+        break;
+    case kShapeRemove:
+        for (size_t j = i; j + 1 < cfg_.shapeCount; ++j) {
+            cfg_.shapes[j] = std::move(cfg_.shapes[j + 1]);
+            shapeLayers_[j] = std::move(shapeLayers_[j + 1]);
+            shapeErrors_[j] = std::move(shapeErrors_[j + 1]);
+        }
+        --cfg_.shapeCount;
+        cfg_.shapes[cfg_.shapeCount] = ShapeLayerCfg{};
+        shapeLayers_[cfg_.shapeCount] = shapes::Layer{};
+        shapeErrors_[cfg_.shapeCount].clear();
+        break;
+    default: return;
+    }
+    ++shapeVersion_;
+    SaveShapeLayers();
+    BuildShapeMenu();
+    SyncControls();
+    InvalidateMap();
+}
+
+// The layers are drawn into shapeCache_ and the picture reused while the map
+// stays put, so the radar's Play and arriving tiles cost only a copy. While
+// a drag lasts the picture slides along instead; it is drawn afresh after.
+void App::PaintShapes(Graphics& g, const RectF& r, double ox, double oy) {
+    assert(cfg_.shapeCount <= kMaxShapeLayers);
+    const int z = cfg_.state.mapZoom;
+    const int w = static_cast<int>(r.Width), h = static_cast<int>(r.Height);
+    const double rx = ox - r.X, ry = oy - r.Y;   // the map's origin in the picture
+    ShapeCache& c = shapeCache_;
+    const bool same = c.bmp != nullptr && c.z == z && c.scale == scale_ && c.w == w && c.h == h && c.version == shapeVersion_;
+    if (!same || (!dragging_ && (c.ox != rx || c.oy != ry))) {
+        if (c.bmp == nullptr || c.w != w || c.h != h) {
+            c.bmp = std::make_unique<Bitmap>(w, h, PixelFormat32bppPARGB);
+            if (c.bmp->GetLastStatus() != Ok) { c = ShapeCache{}; return; }
+        }
+        Graphics cg(c.bmp.get());
+        cg.Clear(Color(0, 0, 0, 0));
+        cg.SetSmoothingMode(SmoothingModeAntiAlias);
+        cg.SetPixelOffsetMode(PixelOffsetModeHalf);
+        const double world = slippy::WorldSize(z) * static_cast<double>(scale_);   // the world across, on screen
+        const RectF local(0.0f, 0.0f, static_cast<REAL>(w), static_cast<REAL>(h));
+        for (size_t k = cfg_.shapeCount; k-- > 0;) {   // the first is drawn last, on top
+            if (cfg_.shapes[k].on && !shapeLayers_[k].records.empty()) {
+                PaintShapeLayer(cg, shapeLayers_[k], cfg_.shapes[k].rgb, local, rx, ry, world);
+            }
+        }
+        c.z = z;
+        c.scale = scale_;
+        c.w = w;
+        c.h = h;
+        c.version = shapeVersion_;
+        c.ox = rx;
+        c.oy = ry;
+    }
+    const InterpolationMode was = g.GetInterpolationMode();
+    g.SetInterpolationMode(InterpolationModeNearestNeighbor);   // pixel for pixel
+    g.DrawImage(c.bmp.get(), static_cast<REAL>(std::round(r.X + rx - c.ox)), static_cast<REAL>(std::round(r.Y + ry - c.oy)),
+                static_cast<REAL>(w), static_cast<REAL>(h));
+    g.SetInterpolationMode(was);
+}
+
+// One layer, in each copy of the world the view shows (it repeats east-west).
+// Its shapes are gathered into one path, drawn in a call whenever it grows
+// large and at the end: for a road layer of 100,000 short segments this is
+// about nine times faster than a call for each (measured 28 Nov 2026).
+void App::PaintShapeLayer(Graphics& g, const shapes::Layer& layer, uint32_t rgb, const RectF& r, double ox, double oy, double world) {
+    assert(world > 0.0 && layer.xy.size() % 2 == 0);
+    const auto R = static_cast<BYTE>(rgb >> 16), G = static_cast<BYTE>(rgb >> 8), B = static_cast<BYTE>(rgb);
+    Pen pen(Color(255, R, G, B), 1.5f * scale_);
+    pen.SetLineJoin(LineJoinRound);
+    SolidBrush fill(Color(48, R, G, B));
+    SolidBrush dot(Color(255, R, G, B));
+    const REAL rad = 2.5f * scale_;
+    const double pad = 8.0 * static_cast<double>(scale_) / world;   // a line's width and a dot, as world fractions
+    const double fx0 = (r.X - ox) / world - pad, fx1 = (r.X + r.Width - ox) / world + pad;
+    const double fy0 = (r.Y - oy) / world - pad, fy1 = (r.Y + r.Height - oy) / world + pad;
+    const RectF view(r.X - 64.0f, r.Y - 64.0f, r.Width + 128.0f, r.Height + 128.0f);
+    auto seen = [&](const shapes::Box& b, double shift) {
+        return b.x0 + shift <= fx1 && b.x1 + shift >= fx0 && b.y0 <= fy1 && b.y1 >= fy0;
+    };
+    GraphicsPath path(FillModeAlternate);   // a polygon's holes stay holes
+    auto draw = [&] {
+        if (path.GetPointCount() == 0) { return; }
+        if (layer.kind == shapes::Kind::Point) {
+            g.FillPath(&dot, &path);
+        } else {
+            if (layer.kind == shapes::Kind::Polygon) { g.FillPath(&fill, &path); }
+            g.DrawPath(&pen, &path);
+        }
+        path.Reset();
+        path.SetFillMode(FillModeAlternate);
+    };
+    const int c0 = static_cast<int>(std::floor(fx0)) - 1;
+    for (int copy = c0; copy <= static_cast<int>(std::floor(fx1)) && copy - c0 < 4; ++copy) {
+        if (!seen(layer.box, copy)) { continue; }
+        const double sx = ox + copy * world;
+        for (const shapes::Record& rec : layer.records) {
+            if (!seen(rec.box, copy)) { continue; }
+            for (uint32_t pi = rec.firstPart; pi < rec.firstPart + rec.partCount; ++pi) {
+                const shapes::Part& part = layer.parts[pi];
+                const float* xy = layer.xy.data() + 2 * size_t{ part.first };
+                if (layer.kind == shapes::Kind::Line) {
+                    AddLinePart(path, xy, part.count, sx, oy, world, view, shapePts_);
+                } else if (layer.kind == shapes::Kind::Polygon) {
+                    AddRing(path, xy, part.count, sx, oy, world, shapePts_);
+                } else {
+                    for (uint32_t q = 0; q < part.count; ++q) {
+                        path.AddEllipse(static_cast<REAL>(sx + xy[2 * q] * world) - rad, static_cast<REAL>(oy + xy[2 * q + 1] * world) - rad,
+                                        2.0f * rad, 2.0f * rad);
+                    }
+                }
+            }
+            if (path.GetPointCount() > 65536) { draw(); }   // between shapes, so a polygon's rings stay together
+        }
+    }
+    draw();
+}
+
 std::wstring App::MapCredit() const {
     std::wstring t = kCreditOsm;
     if (cfg_.state.radar && RadarSource() == radar::Source::World) { t += L" · " + std::wstring(kCreditRv); }

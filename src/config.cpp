@@ -134,6 +134,31 @@ std::wstring FormatLocation(const Location& loc) {
     return loc.name + b.data();
 }
 
+bool ParseShapeLayer(const std::wstring& value, const std::wstring& dir, ShapeLayerCfg& out) {
+    const size_t a = value.find(L'|');
+    const size_t b = a == std::wstring::npos ? a : value.find(L'|', a + 1);
+    if (b == std::wstring::npos || b != a + 8 || value[a + 1] != L'#' || b + 1 >= value.size()) { return false; }
+    const std::wstring hex = value.substr(a + 2, 6);
+    wchar_t* end = nullptr;
+    const unsigned long rgb = std::wcstoul(hex.c_str(), &end, 16);
+    if (end != hex.c_str() + 6) { return false; }
+    std::wstring path = value.substr(b + 1);
+    const bool absolute = path.size() >= 2 && (path[1] == L':' || (path[0] == L'\\' && path[1] == L'\\'));
+    if (!absolute) { path = dir + L"\\" + path; }
+    out.on   = value.substr(0, a) != L"off";
+    out.rgb  = static_cast<uint32_t>(rgb);
+    out.path = path;
+    return true;
+}
+
+std::wstring FormatShapeLayer(const ShapeLayerCfg& layer, const std::wstring& dir) {
+    assert(!layer.path.empty() && layer.rgb <= 0xFFFFFFu);
+    std::array<wchar_t, 16> b{};
+    swprintf_s(b.data(), b.size(), L"|#%06X|", static_cast<unsigned>(layer.rgb));
+    const bool inside = StartsWithI(layer.path, dir) && layer.path.size() > dir.size() + 1;
+    return (layer.on ? L"on" : L"off") + std::wstring(b.data()) + (inside ? layer.path.substr(dir.size() + 1) : layer.path);
+}
+
 std::wstring CacheFileFor(const Config& cfg, const Location& loc) {
     std::array<wchar_t, 64> b{};
     swprintf_s(b.data(), b.size(), L"\\%.4f_%.4f.csv", loc.lat, loc.lon);
@@ -169,6 +194,14 @@ bool LoadConfig(const std::wstring& dir, Config& cfg, std::wstring& err) {
         Location loc;
         if (eq != std::wstring::npos && ParseLocation(entry.substr(eq + 1), loc)) { cfg.locs[cfg.locCount++] = loc; }
     }
+    const DWORD gotShp = GetPrivateProfileSectionW(L"shapes", buf.get(), kSectionChars, cfg.path.c_str());
+    for (DWORD p = 0; p < gotShp && buf[p] != L'\0' && cfg.shapeCount < kMaxShapeLayers;) {
+        const std::wstring entry(buf.get() + p);
+        p += static_cast<DWORD>(entry.size()) + 1;
+        const size_t eq = entry.find(L'=');
+        ShapeLayerCfg layer;
+        if (eq != std::wstring::npos && ParseShapeLayer(entry.substr(eq + 1), dir, layer)) { cfg.shapes[cfg.shapeCount++] = layer; }
+    }
 
     ViewState& s = cfg.state;
     s.selected = static_cast<size_t>(Clamp(ReadInt(cfg, L"state", L"selected", 0), 0, kMaxLocations - 1));
@@ -178,6 +211,7 @@ bool LoadConfig(const std::wstring& dir, Config& cfg, std::wstring& err) {
     s.radarSrc = Clamp(ReadInt(cfg, L"state", L"radarSource", 0), 0, 1);
     s.alerts   = ReadInt(cfg, L"state", L"alerts", 0) != 0;
     s.satellite = ReadInt(cfg, L"state", L"satellite", 0) != 0;
+    s.shapes   = ReadInt(cfg, L"state", L"shapes", 1) != 0;
     const std::wstring mlat = ReadStr(cfg, L"state", L"mapLat", L"");
     const std::wstring mlon = ReadStr(cfg, L"state", L"mapLon", L"");
     if (!mlat.empty() && !mlon.empty()) {
@@ -232,6 +266,21 @@ bool SaveLocations(const Config& cfg, std::wstring& err) {
     return true;
 }
 
+bool SaveShapes(const Config& cfg, std::wstring& err) {
+    assert(cfg.shapeCount <= kMaxShapeLayers);
+    std::wstring section;
+    for (size_t i = 0; i < cfg.shapeCount; ++i) {
+        section += std::to_wstring(i + 1) + L"=" + FormatShapeLayer(cfg.shapes[i], cfg.dir);
+        section += L'\0';
+    }
+    section += L'\0';
+    if (!WritePrivateProfileSectionW(L"shapes", section.c_str(), cfg.path.c_str())) {
+        err = L"Could not write " + cfg.path;
+        return false;
+    }
+    return true;
+}
+
 bool SaveState(const Config& cfg, std::wstring& err) {
     const ViewState& s = cfg.state;
     bool ok = WriteStr(cfg, L"state", L"selected", std::to_wstring(s.selected), err) &&
@@ -245,7 +294,8 @@ bool SaveState(const Config& cfg, std::wstring& err) {
               WriteStr(cfg, L"state", L"radar", s.radar ? L"1" : L"0", err) &&
               WriteStr(cfg, L"state", L"radarSource", std::to_wstring(s.radarSrc), err) &&
               WriteStr(cfg, L"state", L"alerts", s.alerts ? L"1" : L"0", err) &&
-              WriteStr(cfg, L"state", L"satellite", s.satellite ? L"1" : L"0", err);
+              WriteStr(cfg, L"state", L"satellite", s.satellite ? L"1" : L"0", err) &&
+              WriteStr(cfg, L"state", L"shapes", s.shapes ? L"1" : L"0", err);
     if (ok && s.hasMap) {
         std::array<wchar_t, 32> la{}, lo{};
         swprintf_s(la.data(), la.size(), L"%.5f", s.mapLat);
